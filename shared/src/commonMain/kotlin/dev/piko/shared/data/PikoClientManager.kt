@@ -62,13 +62,16 @@ class PikoClientManager(
     fun setConcurrentAcceleration(enabled: Boolean) {
         synchronized(budgetLock) {
             currentConcurrentAcceleration = enabled
-            _currentClient.value?.concurrentAcceleration = enabled
+            // 发布版 pikpak-kotlin 2.5.0 还没有这个属性，只有 ../pikpak-kotlin 源码构建才有。
+            // 用发布版构建时这里退化为只记录开关状态，实际并发数仍由 CONNECTION_BUDGET 决定
+            // _currentClient.value?.concurrentAcceleration = enabled
         }
     }
 
     private fun publishCurrentClient(client: PikPakClient): PikPakClient? = synchronized(budgetLock) {
         client.setTransportMemoryBudgetBytes(currentTransportBudgetBytes)
-        client.concurrentAcceleration = currentConcurrentAcceleration
+        // 同上：发布版 SDK 无 concurrentAcceleration，只在本地 SDK 源码构建里生效
+        // client.concurrentAcceleration = currentConcurrentAcceleration
         val previous = _currentClient.value
         _currentClient.value = client
         previous
@@ -444,7 +447,9 @@ class PikoClientManager(
             // 取 64 突发 / 60 req/s 留足近一倍安全余量，批量重命名、引用保存与归档直接跑满多路并发
             rateLimiter = io.github.nihildigit.pikpak.RateLimiter(capacity = 64, refillPerSecond = 60.0),
             transportMemoryBudgetBytes = currentTransportBudgetBytes,
-            concurrentAcceleration = currentConcurrentAcceleration,
+            // 发布版 pikpak-kotlin 2.5.0 构造器没有 concurrentAcceleration 参数；
+            // 只有 local.properties 指向 ../pikpak-kotlin 源码构建时才可放开这一行
+            // concurrentAcceleration = currentConcurrentAcceleration,
         )
     }
 
