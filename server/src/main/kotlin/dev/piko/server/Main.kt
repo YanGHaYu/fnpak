@@ -104,7 +104,7 @@ fun Application.installServer(graph: ServiceGraph, access: AccessControl) {
         linkRoutes(graph)
         taskRoutes(graph)
         downloadRoutes(graph)
-        mediaRoutes()
+        mediaRoutes(graph)
         sseRoutes(graph)
         staticRoutes()
     }

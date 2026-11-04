@@ -171,6 +171,23 @@ data class OfflineTaskItem(
 @Serializable
 data class OfflineTaskListResponse(val items: List<OfflineTaskItem>, val nextPageToken: String = "")
 
+// ---- 浏览器播放 ----
+
+@Serializable
+data class MediaInfoResponse(
+    val id: String,
+    val name: String,
+    val sizeBytes: Long,
+    val mimeType: String,
+    val fileExtension: String,
+    /** `redirect`：302 到 PikPak 签名直链；`proxy`：服务端字节流转发。 */
+    val mode: String,
+    /** 为什么选这条路，例如 `direct_probe_http_200` / `direct_probe_http_403`。 */
+    val modeReason: String,
+    /** 当前实现两条路都接受单段 Range。 */
+    val rangeSupported: Boolean = true,
+)
+
 // ---- 本机下载 ----
 
 @Serializable

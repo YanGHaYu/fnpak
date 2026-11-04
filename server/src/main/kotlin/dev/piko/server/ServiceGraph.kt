@@ -57,6 +57,9 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     val driveRepository: PikoDriveRepository = PikoDriveRepository(clientManager)
 
+    /** M3：媒体元数据、直链探测与 Range 字节流转发。 */
+    val mediaService = dev.piko.server.media.MediaService(driveRepository)
+
     val instantRepository: InstantMagnetRepository = InstantMagnetRepository(clientManager)
 
     val taskRepository: TaskRepository = TaskRepository(clientManager, driveRepository, instantRepository)
@@ -93,6 +96,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         runBlocking { withTimeoutOrNull(3_000) { runCatching { downloadCoordinator.flushPersistence() } } }
         runCatching { clientManager.currentClient.value?.close() }
         runCatching { captchaClient.close() }
+        runCatching { mediaService.close() }
         scope.cancel()
     }
 }

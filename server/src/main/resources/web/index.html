@@ -96,6 +96,18 @@
     </table>
   </section>
 
+  <section id="player-panel" class="card" hidden>
+    <div class="toolbar">
+      <h2 id="player-title" class="grow">播放</h2>
+      <span id="player-mode" class="badge pending">查询模式…</span>
+      <button id="player-force-proxy" type="button" class="secondary small">强制转发</button>
+      <button id="player-close" type="button" class="secondary small">关闭</button>
+    </div>
+    <video id="player-video" controls preload="metadata" playsinline></video>
+    <p id="player-meta" class="muted"></p>
+    <pre id="player-diag" class="diag" hidden></pre>
+  </section>
+
   <section id="links-panel" class="card" hidden>
     <h2>链接解析 / 离线任务</h2>
     <p class="hint">

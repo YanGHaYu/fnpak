@@ -48,6 +48,14 @@
     tasksPanel: $('tasks-panel'),
     refreshTasks: $('refresh-tasks'),
     taskItems: $('task-items'),
+    playerPanel: $('player-panel'),
+    playerTitle: $('player-title'),
+    playerMode: $('player-mode'),
+    playerForceProxy: $('player-force-proxy'),
+    playerClose: $('player-close'),
+    playerVideo: $('player-video'),
+    playerMeta: $('player-meta'),
+    playerDiag: $('player-diag'),
   };
 
   let crumbs = [{ id: '', name: '根目录' }];
@@ -321,6 +329,14 @@
 
       const actions = document.createElement('td');
       if (!item.isFolder) {
+        if (item.isVideo) {
+          const play = document.createElement('button');
+          play.type = 'button';
+          play.className = 'small';
+          play.textContent = '播放';
+          play.addEventListener('click', () => openPlayer(item));
+          actions.appendChild(play);
+        }
         const download = document.createElement('button');
         download.type = 'button';
         download.className = 'secondary small';
@@ -363,6 +379,105 @@
     crumbs = typed ? [{ id: '', name: '根目录' }, { id: typed, name: typed }] : [{ id: '', name: '根目录' }];
     loadList();
   }
+
+  // ---------- 浏览器播放（M3） ----------
+
+  let playingItem = null;
+  let playingMode = '';
+
+  function showPlayerDiag(text, visible = true) {
+    els.playerDiag.textContent = text;
+    els.playerDiag.hidden = !visible;
+  }
+
+  /**
+   * 播放前先打一次 Range 预检，把 HTTP 状态、content-type、content-range 留下来。
+   * 这样 <video> 报错时能给出可诊断信息，而不是只有“播放失败”。
+   */
+  async function probeStream(id) {
+    try {
+      const response = await fetch(`/api/media/${encodeURIComponent(id)}/stream`, {
+        headers: { Range: 'bytes=0-1023' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      const type = response.headers.get('content-type') || '—';
+      const range = response.headers.get('content-range') || '—';
+      const mode = response.headers.get('x-piko-media-mode') || '—';
+      return {
+        text: `预检：HTTP ${response.status}${response.redirected ? '（已跟随 302 到直链）' : ''}` +
+          ` · content-type=${type} · content-range=${range} · mode=${mode}`,
+        status: response.status,
+      };
+    } catch (error) {
+      return { text: `预检失败：${error.name}: ${error.message}`, status: 0 };
+    }
+  }
+
+  async function openPlayer(item) {
+    playingItem = item;
+    playingMode = '';
+    els.playerPanel.hidden = false;
+    els.playerTitle.textContent = item.name || item.id;
+    els.playerMeta.textContent = `${formatSize(item.sizeBytes)} · ${item.mimeType || '未知类型'}`;
+    els.playerMode.textContent = '查询模式…';
+    els.playerMode.className = 'badge pending';
+    els.playerVideo.removeAttribute('src');
+    els.playerVideo.load();
+    showPlayerDiag('', false);
+
+    const info = await api(`/api/media/${encodeURIComponent(item.id)}/info`);
+    if (playingItem !== item) return;
+    if (!info.ok) {
+      els.playerMode.textContent = '信息失败';
+      els.playerMode.className = 'badge danger';
+      showPlayerDiag(errorText(info));
+      return;
+    }
+    const data = info.data || {};
+    playingMode = data.mode || '';
+    els.playerMode.textContent = playingMode === 'redirect' ? '直链模式（302）' : '转发模式（服务端代理）';
+    els.playerMode.className = 'badge ok';
+    els.playerMeta.textContent = `${formatSize(data.sizeBytes || item.sizeBytes)} · ${data.mimeType || '未知类型'} · 选路原因：${data.modeReason || '—'}`;
+
+    const probe = await probeStream(item.id);
+    if (playingItem !== item) return;
+    if (probe.status === 416) {
+      showPlayerDiag(`${probe.text}\n结论：服务端返回 416，Range 预检不合法或文件大小未知。`);
+      return;
+    }
+    els.playerVideo.src = `/api/media/${encodeURIComponent(item.id)}/stream`;
+    els.playerVideo.load();
+    showPlayerDiag(probe.text);
+  }
+
+  els.playerVideo.addEventListener('error', () => {
+    const code = els.playerVideo.error?.code;
+    const names = { 1: 'MEDIA_ERR_ABORTED', 2: 'MEDIA_ERR_NETWORK', 3: 'MEDIA_ERR_DECODE', 4: 'MEDIA_ERR_SRC_NOT_SUPPORTED' };
+    const reason = names[code] || `未知（${code}）`;
+    const supported = playingItem?.mimeType || '未知';
+    showPlayerDiag(
+      `${els.playerDiag.textContent || '预检：未执行'}\n浏览器错误：${reason}\n声明类型：${supported}\n` +
+      `提示：mkv/hevc 等封装浏览器通常无法解码；若 HTTP 正常但无法播放，播放器已拿到字节流。`,
+    );
+  });
+
+  els.playerForceProxy.addEventListener('click', () => {
+    if (!playingItem) return;
+    els.playerMode.textContent = '转发模式（手动强制）';
+    els.playerMode.className = 'badge ok';
+    els.playerVideo.src = `/api/media/${encodeURIComponent(playingItem.id)}/stream?mode=proxy`;
+    els.playerVideo.load();
+    showPlayerDiag(`${els.playerDiag.textContent}\n已切换为 ?mode=proxy。`);
+  });
+
+  els.playerClose.addEventListener('click', () => {
+    playingItem = null;
+    els.playerVideo.pause();
+    els.playerVideo.removeAttribute('src');
+    els.playerVideo.load();
+    els.playerPanel.hidden = true;
+  });
 
   // ---------- 链接解析 / 离线任务 ----------
 
