@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piko Server</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>Piko <span class="muted">fnOS 服务端</span></h1>
+  <span id="auth-badge" class="badge pending">检查登录态…</span>
+</header>
+
+<main>
+  <section id="login-panel" class="card" hidden>
+    <h2>导入令牌</h2>
+    <p class="hint">
+      M1 只支持令牌导入。在已登录的 Piko 桌面客户端里取得 <code>accessToken</code> 与
+      <code>refreshToken</code>，粘贴到这里；服务端会把会话写进 <code>piko.home</code>，后续由 SDK 自动刷新。
+    </p>
+    <form id="token-form" autocomplete="off">
+      <label>账号
+        <input id="account" name="account" placeholder="name@example.com" required>
+      </label>
+      <label>accessToken
+        <textarea id="accessToken" name="accessToken" rows="3" spellcheck="false" required></textarea>
+      </label>
+      <label>refreshToken（可选）
+        <textarea id="refreshToken" name="refreshToken" rows="3" spellcheck="false"></textarea>
+      </label>
+      <button type="submit">导入</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </section>
+
+  <section id="drive-panel" class="card" hidden>
+    <div class="toolbar">
+      <button id="up" type="button" class="secondary" disabled>↑ 上级</button>
+      <input id="parent-id" placeholder="目录 ID（留空 = 根目录）">
+      <button id="load" type="button">列目录</button>
+      <button id="logout" type="button" class="danger">退出登录</button>
+    </div>
+    <p id="path" class="path">/</p>
+    <p id="status" class="muted"></p>
+    <table>
+      <thead><tr><th>名称</th><th class="num">大小</th><th>类型</th></tr></thead>
+      <tbody id="items"></tbody>
+    </table>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

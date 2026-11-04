@@ -32,6 +32,7 @@ include(":shared")
 include(":ui")
 include(":desktopApp")
 include(":cli")
+include(":server")
 include(":shots")
 
 // 与 SDK 联调：local.properties 里写 pikpak.sdk.dir=../pikpak-kotlin，依赖里的 pikpak-kotlin 就换成那个目录的
