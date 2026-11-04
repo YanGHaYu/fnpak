@@ -9,6 +9,22 @@
     accessForm: $('access-form'),
     passcode: $('passcode'),
     accessError: $('access-error'),
+    settingsPanel: $('settings-panel'),
+    settingsVersion: $('settings-version'),
+    tokenFingerprint: $('token-fingerprint'),
+    tokenSource: $('token-source'),
+    tokenPath: $('token-path'),
+    passcodeForm: $('passcode-form'),
+    newPasscode: $('new-passcode'),
+    passcodeStatus: $('passcode-status'),
+    shareSelect: $('share-select'),
+    subPath: $('sub-path'),
+    testWrite: $('test-write'),
+    saveDownloadDir: $('save-download-dir'),
+    downloadDir: $('download-dir'),
+    downloadStatus: $('download-status'),
+    sharesNote: $('shares-note'),
+    refreshShares: $('refresh-shares'),
     signinPanel: $('signin-panel'),
     signinForm: $('signin-form'),
     signinAccount: $('signin-account'),
@@ -74,6 +90,7 @@
     els.linksPanel.hidden = true;
     els.downPanel.hidden = true;
     els.tasksPanel.hidden = true;
+    els.settingsPanel.hidden = true;
     if (eventSource) { eventSource.close(); eventSource = null; }
     els.accessError.textContent = message || '';
     els.accessError.hidden = !message;
@@ -124,6 +141,9 @@
     const result = await api('/api/access/state');
     if (!result.ok || !result.data?.authenticated) { showAccess(); return false; }
     els.accessPanel.hidden = true;
+    // 设置只要求过访问门，不要求已登录 PikPak：改口令/换下载位置都是本机管理员操作
+    els.settingsPanel.hidden = false;
+    await loadSettings();
     return true;
   }
 
@@ -289,6 +309,103 @@
       if (state.initializing) setTimeout(refreshAuth, 1000);
     }
   }
+
+  // ---------- 设置 ----------
+
+  function errorMessage(result, action) {
+    const code = result.data?.error?.code;
+    const message = result.data?.error?.message;
+    if (!result.data) return `${action}失败：HTTP ${result.status}`;
+    return `${action}失败：HTTP ${result.status}${code ? ` [${code}]` : ''} ${message || ''}`;
+  }
+
+  async function loadSettings() {
+    const result = await api('/api/settings');
+    if (!result.ok) {
+      els.downloadStatus.textContent = `读取设置失败：HTTP ${result.status}`;
+      return;
+    }
+    const data = result.data;
+    els.settingsVersion.textContent = `服务端 ${data.version}`;
+    els.tokenFingerprint.textContent = data.accessToken.fingerprint;
+    els.tokenSource.textContent = `口令来源：${data.accessToken.source}`;
+    els.tokenPath.textContent = data.accessToken.filePath;
+    els.downloadDir.textContent = data.downloadDir;
+    const managed = data.accessToken.managedExternally;
+    els.newPasscode.disabled = managed;
+    els.passcodeStatus.textContent = managed ? '口令由启动参数/环境变量管理，页面不可改（返回 409 token_managed_externally）。' : '';
+    await loadShares();
+  }
+
+  async function loadShares() {
+    const result = await api('/api/settings/shares');
+    if (!result.ok) {
+      els.downloadStatus.textContent = `读取授权目录失败：HTTP ${result.status}`;
+      return;
+    }
+    const previous = els.shareSelect.value;
+    els.shareSelect.innerHTML = '';
+    for (const share of result.data.shares) {
+      const option = document.createElement('option');
+      const tag = share.source === 'declared' ? '内置共享' : '已授权';
+      option.value = share.path;
+      option.textContent = share.writable ? `${share.path}（${tag}）` : `${share.path}（${tag}，只读：${share.reason}）`;
+      option.disabled = !share.writable;
+      els.shareSelect.append(option);
+    }
+    if (result.data.shares.some((s) => s.path === previous)) {
+      els.shareSelect.value = previous;
+    }
+    els.sharesNote.textContent = result.data.note || '';
+    els.downloadStatus.textContent = result.data.shares.length
+      ? ''
+      : '没有可用的授权目录：到飞牛「应用设置 → 访问权限」点「+ 添加」授权一个文件夹，再点「刷新目录」或重启应用。';
+  }
+
+  async function submitDownloadDir(dryRun) {
+    const subPath = els.subPath.value.trim();
+    const shareRoot = els.shareSelect.value;
+    if (!shareRoot) {
+      els.downloadStatus.textContent = '请先选择一个授权目录';
+      return;
+    }
+    els.downloadStatus.textContent = dryRun ? '测试中…' : '保存中…';
+    const result = await api('/api/settings/download-dir', {
+      method: 'POST',
+      body: JSON.stringify({ shareRoot, subPath, dryRun }),
+    });
+    if (!result.ok) {
+      els.downloadStatus.textContent = errorMessage(result, dryRun ? '测试写入' : '保存下载位置');
+      return;
+    }
+    if (dryRun) {
+      els.downloadStatus.textContent = `可写：${result.data.downloadDir}（尚未保存）`;
+      return;
+    }
+    els.downloadDir.textContent = result.data.downloadDir;
+    els.downloadStatus.textContent = `已保存：${result.data.downloadDir}。新任务立即生效，进行中的任务继续用旧目录。`;
+    refreshHealth();
+  }
+
+  els.passcodeForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    els.passcodeStatus.textContent = '提交中…';
+    const result = await api('/api/settings/access-token', {
+      method: 'POST',
+      body: JSON.stringify({ newPasscode: els.newPasscode.value.trim() }),
+    });
+    if (result.ok) {
+      els.newPasscode.value = '';
+      els.passcodeStatus.textContent = '口令已更新：其它会话全部失效，本页继续可用。';
+      await loadSettings();
+      return;
+    }
+    els.passcodeStatus.textContent = errorMessage(result, '修改口令');
+  });
+
+  els.testWrite.addEventListener('click', () => submitDownloadDir(true));
+  els.saveDownloadDir.addEventListener('click', () => submitDownloadDir(false));
+  els.refreshShares.addEventListener('click', () => loadShares());
 
   // ---------- 目录 ----------
 

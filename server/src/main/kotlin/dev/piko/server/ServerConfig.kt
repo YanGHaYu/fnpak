@@ -1,19 +1,23 @@
 package dev.piko.server
 
+import dev.piko.server.settings.ServerSettingsFile
+import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * 服务端启动参数。优先级：命令行 > 环境变量 > 默认值。
+ * 服务端启动参数。优先级：命令行 > 环境变量 > 设置文件 > 默认值。
  *
  * - 端口：`--port` / `--port=18080` > `PORT` > [DEFAULT_PORT]
- * - 监听地址：`--host` > [DEFAULT_HOST]。默认只监听回环：不带任何配置启动时局域网里打不开，
- *   要对外监听必须显式 `--host 0.0.0.0`，且必须同时提供访问口令。
- * - 访问口令：`--access-token` > `PIKO_SERVER_TOKEN`。未提供时，回环监听会生成一份随机口令
- *   （见 `AccessControl`），非回环监听直接拒绝启动。
+ * - 监听地址：`--host` > [DEFAULT_HOST]
+ * - 访问口令：`--access-token` > `PIKO_SERVER_TOKEN` > 数据目录的 `access-token` 文件 > 首次启动随机生成并落盘。
+ *   前两者算「外部托管」（[accessTokenManagedExternally]），此时页面不允许改口令。
  * - 数据根目录：系统属性 `piko.home`，由 fpk 的 cmd/main 注入 `$TRIM_PKGVAR`；未给时退回 `~/.piko`
- * - 下载目录：`TRIM_DATA_SHARE_PATHS`（冒号分隔取第一项）> `-Dpiko.downloadDir` > 系统临时目录下的 `piko-downloads`
+ * - 下载目录：`<home>/settings.json` 里的 `downloadDir`（存在且目录还在）> `TRIM_DATA_SHARE_PATHS` 第一项 + `/downloads`
+ *   > `-Dpiko.downloadDir` > 系统临时目录下的 `piko-downloads`
+ * - 共享根：`TRIM_DATA_SHARE_PATHS`（冒号分隔），设置页的下载位置只能落在这些根下面
  *
- * 只读这些参数，不解析配置文件：fpk 场景下端口由 manifest 的 `service_port` 决定，没有第二份配置的必要。
+ * 口令与下载目录都收敛成「文件里说了算」：进程启动时读文件，运行期改了就原子写回文件，
+ * 不存在「脚本一份、进程一份」的双写者。
  */
 data class ServerConfig(
     val host: String,
@@ -22,19 +26,38 @@ data class ServerConfig(
     val downloadDir: Path,
     /** 命令行或环境变量显式给出的访问口令；null 表示没给。不要写进日志。 */
     val accessToken: String?,
+    /** 口令来自启动参数/环境变量时为真：页面改口令会被 409 拒绝。 */
+    val accessTokenManagedExternally: Boolean,
+    /** 允许写入的共享根：`config/resource` 声明的（TRIM_DATA_SHARE_PATHS）+ 管理员授权的（TRIM_DATA_ACCESSIBLE_PATHS）。 */
+    val shares: List<Path>,
+    /** 仅 `config/resource` 声明的共享根（安装时由系统创建）。 */
+    val declaredShares: List<Path>,
+    /** 仅「应用设置 → 访问权限」里由管理员授权的路径（启动时环境变量可见的部分）。 */
+    val authorizedShares: List<Path>,
 ) {
-    /** 回环地址才允许不带口令启动。 */
+    /** 回环地址标记，仅用于日志与提示。 */
     val isLoopback: Boolean get() = isLoopbackHost(host)
+
+    @Volatile
+    private var runtimeDownloadDir: Path = downloadDir
+
+    /** 当前生效的下载目录。设置页切换后立即指向新目录；已在跑的任务仍用它们各自绑定的旧路径。 */
+    val activeDownloadDir: Path get() = runtimeDownloadDir
+
+    fun updateDownloadDir(path: Path) {
+        runtimeDownloadDir = path
+    }
 
     companion object {
         const val DEFAULT_PORT = 18080
         const val DEFAULT_HOST = "127.0.0.1"
-        const val VERSION = "0.2.0-m2"
+        const val VERSION = "0.2.2"
 
         fun from(args: Array<String>): ServerConfig {
             var host = DEFAULT_HOST
             var port = envPort() ?: DEFAULT_PORT
             var token = System.getenv("PIKO_SERVER_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
+            var external = token != null
             var index = 0
             while (index < args.size) {
                 val arg = args[index]
@@ -55,32 +78,36 @@ data class ServerConfig(
                         index++
                         token = args.getOrNull(index)?.trim()?.takeIf { it.isNotEmpty() }
                             ?: throw IllegalArgumentException("--access-token 需要一个非空口令")
+                        external = true
                     }
-                    arg.startsWith("--access-token=") -> token =
-                        arg.substringAfter('=').trim().takeIf { it.isNotEmpty() }
+                    arg.startsWith("--access-token=") -> {
+                        token = arg.substringAfter('=').trim().takeIf { it.isNotEmpty() }
                             ?: throw IllegalArgumentException("--access-token 需要一个非空口令")
+                        external = true
+                    }
                 }
                 index++
             }
             require(port in 1..65535) { "端口超出范围：$port" }
 
-            val loopback = isLoopbackHost(host)
-            if (!loopback && token == null) {
-                // 暴露到局域网却没有口令：直接拒绝启动，而不是悄悄地无鉴权监听
-                throw IllegalArgumentException(
-                    "拒绝启动：--host $host 会把服务暴露到局域网，必须同时提供访问口令" +
-                        "（--access-token 或环境变量 PIKO_SERVER_TOKEN）。" +
-                        "只想本机使用就不要加 --host。",
-                )
-            }
+            // 不再因为「非回环 + 没给口令」而拒绝启动：口令缺失时由 AccessControl 生成一份随机口令
+            // 并落盘（0600），用户 cat 文件即可。这样 fpk 里不需要再有一个「外部注入口令」的脚本角色。
             val home = System.getProperty("piko.home")?.takeIf { it.isNotBlank() }?.let(Path::of)
                 ?: Path.of(System.getProperty("user.home"), ".piko")
+            val normalizedHome = home.toAbsolutePath().normalize()
+            val declared = envPaths("TRIM_DATA_SHARE_PATHS")
+            val authorized = envPaths("TRIM_DATA_ACCESSIBLE_PATHS")
+            val shares = (declared + authorized).distinct()
             return ServerConfig(
                 host = host,
                 port = port,
-                home = home.toAbsolutePath().normalize(),
-                downloadDir = resolveDownloadDir(),
+                home = normalizedHome,
+                downloadDir = resolveDownloadDir(normalizedHome, shares),
                 accessToken = token,
+                accessTokenManagedExternally = external,
+                shares = shares,
+                declaredShares = declared,
+                authorizedShares = authorized,
             )
         }
 
@@ -90,18 +117,41 @@ data class ServerConfig(
             host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]" ||
                 host == "0:0:0:0:0:0:0:1"
 
-        /** 冒号分隔取第一项；Windows 上单字母盘符（`C:`）不算有效路径，退回下一个来源。 */
-        private fun resolveDownloadDir(): Path {
-            val fromShares = System.getenv("TRIM_DATA_SHARE_PATHS")
+        /** 环境变量里的路径列表（冒号分隔）；只保留真实存在的目录。 */
+        private fun envPaths(name: String): List<Path> =
+            System.getenv(name)
                 ?.split(':')
                 ?.map { it.trim() }
-                ?.firstOrNull { it.isNotEmpty() && (it.length > 1 || it != "/") }
-                ?.takeIf { it.length > 2 }
-            val fromProperty = System.getProperty("piko.downloadDir")?.takeIf { it.isNotBlank() }
-            val chosen = fromShares ?: fromProperty
-            val path = if (chosen != null) Path.of(chosen)
-            else Path.of(System.getProperty("java.io.tmpdir"), "piko-downloads")
-            return path.toAbsolutePath().normalize()
+                ?.filter { it.length > 1 }
+                ?.map { Path.of(it).toAbsolutePath().normalize() }
+                ?.filter { Files.isDirectory(it) }
+                ?.distinct()
+                .orEmpty()
+
+        private fun resolveDownloadDir(home: Path, shares: List<Path>): Path {
+            // 首选「第一个可写」的授权目录：第一个可能只是只读挂载，直接 mkdir 会让启动失败
+            shares.firstOrNull()?.takeIf { !Files.isWritable(it) }?.let {
+                System.err.println("[W] Server: 第一个授权目录不可写：$it，改用下一个可写的目录")
+            }
+            val writable = shares.firstOrNull { Files.isWritable(it) }
+            if (writable == null && shares.isNotEmpty()) {
+                System.err.println("[W] Server: ${shares.size} 个授权目录都不可写，下载目录回落到 $home/downloads")
+            }
+            if (shares.isEmpty()) {
+                System.err.println("[W] Server: 没有共享根或授权目录（TRIM_DATA_SHARE_PATHS / TRIM_DATA_ACCESSIBLE_PATHS 均为空），下载目录回落到 $home/downloads")
+            }
+            val fallback = writable?.resolve("downloads")
+                ?: System.getProperty("piko.downloadDir")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
+                ?: home.resolve("downloads")
+            val persisted = ServerSettingsFile.load(home)?.downloadDir
+                ?.takeIf { it.isNotBlank() }
+                ?.let { Path.of(it).toAbsolutePath().normalize() }
+            if (persisted == null) return fallback.toAbsolutePath().normalize()
+            if (Files.isDirectory(persisted)) return persisted
+            System.err.println(
+                "[W] Server: settings.json 里的下载目录已不存在：$persisted，回落到 ${fallback.toAbsolutePath().normalize()}",
+            )
+            return fallback.toAbsolutePath().normalize()
         }
     }
 }

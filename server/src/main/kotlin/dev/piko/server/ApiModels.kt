@@ -16,7 +16,60 @@ data class HealthResponse(
     val authenticated: Boolean,
     val initializing: Boolean,
     val uptimeSeconds: Long,
+    /** 当前生效的下载目录，便于在 NAS 上直接确认设置是否落实。 */
+    val downloadDir: String,
 )
+
+// ---------- 设置页 ----------
+
+/** 口令信息：只暴露指纹（sha256 前 8 位），任何情况下都不回明文。 */
+@Serializable
+data class AccessTokenSettings(
+    val fingerprint: String,
+    /** true 表示口令来自 --access-token / PIKO_SERVER_TOKEN，页面不可改。 */
+    val managedExternally: Boolean,
+    val source: String,
+    val filePath: String,
+)
+
+@Serializable
+data class SettingsResponse(
+    val version: String,
+    val home: String,
+    val accessToken: AccessTokenSettings,
+    val downloadDir: String,
+)
+
+@Serializable
+data class ShareInfo(
+    val path: String,
+    val writable: Boolean,
+    /** `declared`：config/resource 声明的共享根；`authorized`：应用设置→访问权限里授权的目录。 */
+    val source: String,
+    val reason: String? = null,
+)
+
+@Serializable
+data class SharesResponse(
+    val shares: List<ShareInfo>,
+    /** 本次是否通过 fnOS 授权接口实时查询；false 时新加的授权目录要重启应用才可见。 */
+    val live: Boolean = false,
+    val note: String = "",
+)
+
+@Serializable
+data class ChangeAccessTokenRequest(val newPasscode: String = "")
+
+@Serializable
+data class DownloadDirRequest(
+    val shareRoot: String = "",
+    val subPath: String = "",
+    /** true 表示只做校验 + 建目录 + 试写，不持久化（页面「测试写入」用）。 */
+    val dryRun: Boolean = false,
+)
+
+@Serializable
+data class DownloadDirResponse(val downloadDir: String)
 
 @Serializable
 data class AuthStateResponse(

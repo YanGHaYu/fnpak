@@ -64,13 +64,13 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     val taskRepository: TaskRepository = TaskRepository(clientManager, driveRepository, instantRepository)
 
-    private val preferences = ServerPreferences(config.home) { config.downloadDir }
+    private val preferences = ServerPreferences(config.home) { config.activeDownloadDir }
 
     private val cacheStore = FilePikoCacheStore(config.home.resolve("cache").toString())
 
     private val downloadStorage = ServerDownloadStorage(
         cacheDirectory = config.home.resolve("download-cache").toFile(),
-        directoryProvider = { config.downloadDir.toFile() },
+        directoryProvider = { config.activeDownloadDir.toFile() },
     )
 
     val downloadCoordinator = PikoDownloadCoordinator(
@@ -81,7 +81,17 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         cacheStore = cacheStore,
     )
 
-    val downloadDirectory: File get() = config.downloadDir.toFile()
+    val downloadDirectory: File get() = config.activeDownloadDir.toFile()
+
+    /**
+     * 设置页切换下载位置：立刻生效于新任务。已在下载的任务在启动时就把目标文件路径绑死了，
+     * 继续写旧目录，不做中途迁移（半途搬移更容易把一份文件写坏）。
+     */
+    fun applyDownloadDir(path: java.nio.file.Path) {
+        config.updateDownloadDir(path)
+        PikoLog.i("Server", "下载目录切换为 $path（进行中的任务继续用原目录）")
+        runCatching { runBlocking { preferences.setDownloadDirPath(path.toString()) } }
+    }
 
     val isAuthenticated: Boolean get() = clientManager.currentClient.value != null
 
