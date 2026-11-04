@@ -7,6 +7,7 @@ import dev.piko.data.repository.FileNameSanitizer
 import dev.piko.download.DownloadBatch
 import dev.piko.download.DownloadStatus
 import dev.piko.download.DownloadTask
+import dev.piko.download.DownloadedSpan
 import dev.piko.shared.data.LeasedFile
 import dev.piko.shared.data.PikoClientProvider
 import dev.piko.shared.log.PikoLog
@@ -72,6 +73,11 @@ class PikoDownloadCoordinator(
     /** 片段抽取经它开本机代理会话读源文件。缺省时退回任务里存下的直链。 */
     private val mediaRepository: PikoMediaRepository? = null,
     private val cacheStore: PikoCacheStore? = null,
+    /**
+     * 整文件下载的落盘实现。服务端注入「分段直链并发拉取」；桌面端不注入，走 SDK 稀疏暂存。
+     * 注入后原画整文件任务完全由它写盘，不会再叠一套 SDK 缓存写同一份文件。
+     */
+    private val directDownloader: PikoDirectDownloader? = null,
 ) {
     private val _tasks = MutableStateFlow<Map<String, DownloadTask>>(emptyMap())
     val tasks: StateFlow<Map<String, DownloadTask>> = _tasks.asStateFlow()
@@ -270,6 +276,14 @@ class PikoDownloadCoordinator(
             if (task.isSegment) {
                 return stopped.copy(totalBytes = length, downloadedBytes = length).takeIf { length > 0 }
             }
+            // 分段下载的文件一开始就预分配成 totalBytes，光看长度分不出「下完了」和「下到一半被 kill」，
+            // 只有续传区间覆盖满才算完成，否则按未完成接着下
+            if (task.segmented) {
+                val covered = task.completedRanges.sumOf { it.length }
+                if (covered < task.totalBytes) {
+                    return stopped.copy(status = DownloadStatus.PAUSED, downloadedBytes = covered)
+                }
+            }
             return stopped.takeIf { length == task.totalBytes }
         }
         val status = when (task.status) {
@@ -277,13 +291,16 @@ class PikoDownloadCoordinator(
             else -> task.status
         }
         // 保存只在状态变化时发生，记下的字节数可能落后；整文件下载的续传点就是文件长度
-        val downloaded = if (task.isSegment) {
-            task.downloadedBytes
-        } else {
-            if (sparseCache) cachedBytes
-            else storage.existingLength(task.fileName).coerceAtMost(task.totalBytes)
+        val downloaded = when {
+            task.isSegment -> task.downloadedBytes
+            // 分段下载的文件在开始时就预分配成完整长度，不能按长度算进度；续传点是记录下来的区间
+            task.segmented -> if (storage.exists(task.fileName)) task.completedRanges.sumOf { it.length } else 0L
+            sparseCache -> cachedBytes
+            else -> storage.existingLength(task.fileName).coerceAtMost(task.totalBytes)
         }
-        return stopped.copy(status = status, downloadedBytes = downloaded, sparseCache = sparseCache)
+        val spans = if (task.segmented && downloaded > 0L) task.completedRanges else emptyList()
+        return stopped.copy(status = status, downloadedBytes = downloaded, sparseCache = sparseCache,
+            segmented = task.segmented, completedRanges = spans)
     }
 
     /**
@@ -296,8 +313,12 @@ class PikoDownloadCoordinator(
     private suspend fun persistOnStructuralChange() {
         _tasks
             // 暂存的身份（档位与长度）变了也要写：重启时按它登记暂存，记错了暂存会被当成没人要的删掉
+            // 分段下载的续传点（completedRanges）也要写：不发的话重启后只能从头再下
             .distinctUntilChangedBy { tasks ->
-                tasks.mapValues { (_, task) -> listOf(task.status, task.sparseCache, task.fileName, task.mediaId, task.fullFileSize) }
+                tasks.mapValues { (_, task) ->
+                    listOf(task.status, task.sparseCache, task.fileName, task.mediaId, task.fullFileSize,
+                        task.segmented, task.completedRanges)
+                }
             }
             .conflate()
             .collect {
@@ -726,6 +747,13 @@ class PikoDownloadCoordinator(
         val started = TimeSource.Monotonic.markNow()
         try {
             if (task.qualityCap > 0 || task.quality != null) task = chooseQuality(task)
+            // 原画整文件的普通下载交给注入的分段实现：它直接写下载目录里的目标文件，
+            // 与下面的 SDK 稀疏暂存是二选一，不会出现两套逻辑同时写同一个文件。
+            val direct = directDownloader
+            if (direct != null && !task.isSegment && task.mediaId == null && task.totalBytes > 0) {
+                runDirectDownload(task, direct)
+                return
+            }
             val concurrency = preferences.concurrentConnectionsFlow.first().coerceIn(1, 8)
             // 转码档的 handle 要原画的大小（重建文件对象时用），暂存的大小是转码流的长度
             val isLeased = task.leasedSource || LeasedFile.isLeased(task.fileId)
@@ -848,6 +876,61 @@ class PikoDownloadCoordinator(
             withContext(NonCancellable) {
                 runCatching { currentLease?.entry?.store?.flush() }
             }
+        }
+    }
+
+    /**
+     * 原画整文件走注入的分段实现。起点之后（[DownloadedSpan]）由它自己补齐，
+     * 这里只负责把进度、续传点写回任务表，完成后提交并标记完成。
+     *
+     * 换过下载目录时旧的分段文件不在新目标路径下：此时丢掉续传记录从头下，
+     * 宁可慢一点，也不能把「没校验过的字节」当成已下完。
+     */
+    private suspend fun runDirectDownload(task: DownloadTask, downloader: PikoDirectDownloader) {
+        val taskId = task.taskId
+        val target = storage.downloadTarget(task.fileName)
+        val resumable = task.completedRanges.takeIf { spans ->
+            spans.isNotEmpty() && storage.exists(task.fileName)
+        }.orEmpty()
+        if (task.completedRanges.isNotEmpty() && resumable.isEmpty()) {
+            PikoLog.w(TAG, "分段续传记录找不到对应文件（下载目录可能改过），从头下载：${logFile(task.fileId, task.fileName)}")
+        }
+        val startBytes = resumable.sumOf { it.length }
+        update(taskId) {
+            it.copy(status = DownloadStatus.DOWNLOADING, segmented = true, errorMessage = null,
+                completedRanges = resumable, downloadedBytes = startBytes, speedBytesPerSec = 0L)
+        }
+        PikoLog.i(TAG, "分段下载开始：${logFile(task.fileId, task.fileName)}，${task.totalBytes} 字节，" +
+            "已有 $startBytes 字节（${resumable.size} 段），落盘实现=${downloader.name}")
+        val started = TimeSource.Monotonic.markNow()
+        downloader.download(
+            fileId = task.fileId,
+            fileName = task.fileName,
+            targetPath = target,
+            totalBytes = task.totalBytes,
+            completedRanges = resumable,
+            onProgress = { progress ->
+                update(taskId) { current ->
+                    if (current.status == DownloadStatus.COMPLETED) current
+                    else current.copy(downloadedBytes = progress.downloadedBytes, speedBytesPerSec = progress.speedBytesPerSec,
+                        segments = progress.segments)
+                }
+            },
+            onCheckpoint = { spans ->
+                update(taskId) { current ->
+                    if (current.status == DownloadStatus.COMPLETED) current else current.copy(completedRanges = spans)
+                }
+            },
+        )
+        val length = storage.existingLength(task.fileName)
+        check(length == task.totalBytes) { "分段下载结束但文件长度是 $length，应为 ${task.totalBytes}" }
+        val destination = storage.commit(task.fileName, target)
+        val elapsed = started.elapsedNow().inWholeMilliseconds.coerceAtLeast(1)
+        PikoLog.i(TAG, "分段下载完成：${logFile(task.fileId, task.fileName)}，${task.totalBytes} 字节，" +
+            "本次 ${task.totalBytes - startBytes} 字节，历时 $elapsed ms（平均 ${(task.totalBytes - startBytes) * 1000 / elapsed / 1024} KiB/s）")
+        update(taskId) {
+            it.copy(status = DownloadStatus.COMPLETED, downloadedBytes = it.totalBytes, speedBytesPerSec = 0L,
+                destinationPath = destination, sparseCache = false, segments = null)
         }
     }
 

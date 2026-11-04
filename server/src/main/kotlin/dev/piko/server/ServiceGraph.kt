@@ -3,8 +3,13 @@ package dev.piko.server
 import dev.piko.server.auth.CaptchaChallengeStore
 import dev.piko.server.auth.LoginAttemptLimiter
 import dev.piko.server.auth.PikPakCaptchaClient
+import dev.piko.server.download.ConnectionBudget
+import dev.piko.server.download.DownloadTuning
+import dev.piko.server.download.SegmentDownloader
 import dev.piko.server.download.ServerDownloadStorage
 import dev.piko.server.download.ServerPreferences
+import dev.piko.server.settings.ServerSettings
+import dev.piko.server.settings.ServerSettingsFile
 import dev.piko.shared.auth.DesktopSessionStore
 import dev.piko.shared.data.FilePikoCacheStore
 import dev.piko.shared.data.InstantMagnetRepository
@@ -68,6 +73,47 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     private val cacheStore = FilePikoCacheStore(config.home.resolve("cache").toString())
 
+    /** `settings.json` 的运行期副本：下载目录与并发参数都从这里读，写完立即落盘。 */
+    @Volatile
+    private var settings: ServerSettings = ServerSettingsFile.load(config.home) ?: ServerSettings()
+
+    fun currentSettings(): ServerSettings = settings
+
+    /**
+     * 改设置并原子写回。写失败时抛异常，由调用方回 500；内存值不会先于文件生效。
+     */
+    @Synchronized
+    fun updateSettings(transform: (ServerSettings) -> ServerSettings): ServerSettings {
+        val next = transform(settings)
+        ServerSettingsFile.save(config.home, next)
+        settings = next
+        return next
+    }
+
+    /** 并发参数：分段数可运行期改；连接预算是全局的，改上限时排队者立即按新上限放行。 */
+    val downloadTuning = DownloadTuning(
+        segments = settings.segmentCount,
+        maxConnections = settings.maxConnections,
+    )
+
+    val connectionBudget = ConnectionBudget(settings.maxConnections)
+
+    /**
+     * 分段直链下载：原画整文件任务全走它，绕开 SDK 的稀疏暂存。直链只在任务开始时取一次，
+     * 段内 401/403 时由它自己按 `fileId` 重新取。
+     */
+    private val directDownloader = SegmentDownloader(
+        urlProvider = { fileId ->
+            driveRepository.getFileDetail(fileId).getOrThrow().let { detail ->
+                detail.downloadUrl?.takeIf { it.isNotBlank() }
+                    ?: detail.webContentLink?.takeIf { it.isNotBlank() }
+                    ?: error("PikPak 没有返回可用的下载直链")
+            }
+        },
+        budget = connectionBudget,
+        tuning = downloadTuning,
+    )
+
     private val downloadStorage = ServerDownloadStorage(
         cacheDirectory = config.home.resolve("download-cache").toFile(),
         directoryProvider = { config.activeDownloadDir.toFile() },
@@ -79,6 +125,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         storage = downloadStorage,
         scope = scope,
         cacheStore = cacheStore,
+        directDownloader = directDownloader,
     )
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()
@@ -107,6 +154,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         runCatching { clientManager.currentClient.value?.close() }
         runCatching { captchaClient.close() }
         runCatching { mediaService.close() }
+        runCatching { directDownloader.close() }
         scope.cancel()
     }
 }

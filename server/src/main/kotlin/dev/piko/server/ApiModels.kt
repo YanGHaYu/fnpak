@@ -38,6 +38,10 @@ data class SettingsResponse(
     val home: String,
     val accessToken: AccessTokenSettings,
     val downloadDir: String,
+    /** 每个任务的分段数（并发连接数按任务算）。 */
+    val segmentCount: Int = 8,
+    /** 所有任务共用的连接预算。 */
+    val maxConnections: Int = 32,
 )
 
 @Serializable
@@ -70,6 +74,13 @@ data class DownloadDirRequest(
 
 @Serializable
 data class DownloadDirResponse(val downloadDir: String)
+
+/** 分段下载参数：段数 1–32，全局连接预算 4–64。 */
+@Serializable
+data class DownloadTuningRequest(
+    val segments: Int = 8,
+    val maxConnections: Int = 32,
+)
 
 @Serializable
 data class AuthStateResponse(
@@ -276,6 +287,8 @@ data class DownloadProgressEvent(
     val percent: Double,
     val speedBytesPerSec: Long,
     val status: String,
+    /** 分段下载时各段的进度；其他下载方式没有这个字段（保持原字段不变，只做新增）。 */
+    val segments: List<dev.piko.download.DownloadSegmentInfo>? = null,
 )
 
 @Serializable

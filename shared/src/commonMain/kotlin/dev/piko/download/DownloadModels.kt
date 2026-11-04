@@ -5,6 +5,22 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class DownloadStatus { PENDING, DOWNLOADING, PAUSED, COMPLETED, FAILED }
 
+/** 已经落盘的一段字节，闭区间。分段下载的续传点就靠它：重启后只补没有覆盖的部分。 */
+@Serializable
+data class DownloadedSpan(val startByte: Long, val endByte: Long) {
+    val length: Long get() = (endByte - startByte + 1).coerceAtLeast(0)
+}
+
+/** 某个分段的实时进度，供 SSE 的 `segments` 字段与页面进度条使用；不落盘。 */
+@Serializable
+data class DownloadSegmentInfo(
+    val index: Int,
+    val startByte: Long,
+    val endByte: Long,
+    val downloadedBytes: Long,
+    val active: Boolean,
+)
+
 @Serializable
 data class DownloadTask(
     val taskId: String,
@@ -62,6 +78,12 @@ data class DownloadTask(
     val qualityCap: Int = 0,
     /** 转码档已经下完、正在本机转封装，进度在 [progressFraction]。 */
     val converting: Boolean = false,
+    /** 走服务端自研的分段直链下载（`Range: bytes=a-b` 并发拉取），不经 SDK 的稀疏暂存。 */
+    val segmented: Boolean = false,
+    /** 分段下载已落盘的区间；闭区间、互不重叠、按起点升序。重启后据此续传。 */
+    val completedRanges: List<DownloadedSpan> = emptyList(),
+    /** 各分段的实时进度，只在分段下载进行中有值；不落盘。 */
+    val segments: List<DownloadSegmentInfo>? = null,
 ) {
     val progress: Float
         get() = progressFraction?.coerceIn(0f, 1f)

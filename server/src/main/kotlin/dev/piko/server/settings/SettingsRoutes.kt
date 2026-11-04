@@ -4,6 +4,7 @@ import dev.piko.server.AccessTokenSettings
 import dev.piko.server.ChangeAccessTokenRequest
 import dev.piko.server.DownloadDirRequest
 import dev.piko.server.DownloadDirResponse
+import dev.piko.server.DownloadTuningRequest
 import dev.piko.server.ServerConfig
 import dev.piko.server.ServiceGraph
 import dev.piko.server.ShareInfo
@@ -55,8 +56,41 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                     filePath = access.tokenFilePath,
                 ),
                 downloadDir = config.activeDownloadDir.toString(),
+                segmentCount = graph.downloadTuning.segmentCount,
+                maxConnections = graph.connectionBudget.max,
             ),
         )
+    }
+
+    post("/api/settings/download-tuning") {
+        val body = runCatching { call.receive<DownloadTuningRequest>() }.getOrNull()
+            ?: run {
+                call.respondError(HttpStatusCode.BadRequest, "invalid_body", "请求体需要 segments 与 maxConnections")
+                return@post
+            }
+        if (body.segments !in 1..32) {
+            call.respondError(HttpStatusCode.BadRequest, "invalid_segments", "segments 必须在 1–32 之间：${body.segments}")
+            return@post
+        }
+        if (body.maxConnections !in 4..64) {
+            call.respondError(HttpStatusCode.BadRequest, "invalid_connections",
+                "maxConnections 必须在 4–64 之间：${body.maxConnections}")
+            return@post
+        }
+        runCatching { graph.updateSettings { it.copy(segmentCount = body.segments, maxConnections = body.maxConnections) } }
+            .onFailure { error ->
+                call.respondError(
+                    HttpStatusCode.InternalServerError,
+                    "settings_write_failed",
+                    "写入 settings.json 失败：${error::class.simpleName}: ${error.message}",
+                )
+                return@post
+            }
+        graph.downloadTuning.updateSegments(body.segments)
+        graph.connectionBudget.updateLimit(body.maxConnections)
+        PikoLog.w(TAG, "下载并发已更新：来源=${call.remoteIp()}，每任务 ${body.segments} 段，" +
+            "全局连接上限 ${body.maxConnections}（进行中的任务仍按启动时的段数）")
+        call.respond(HttpStatusCode.NoContent)
     }
 
     get("/api/settings/shares") {
@@ -141,7 +175,7 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
             call.respond(DownloadDirResponse(downloadDir = target.toString()))
             return@post
         }
-        runCatching { ServerSettingsFile.save(config.home, ServerSettings(downloadDir = target.toString())) }
+        runCatching { graph.updateSettings { it.copy(downloadDir = target.toString()) } }
             .onFailure { error ->
                 call.respondError(
                     HttpStatusCode.InternalServerError,

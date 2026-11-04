@@ -12,6 +12,10 @@ import kotlinx.serialization.json.Json
 @Serializable
 data class ServerSettings(
     val downloadDir: String? = null,
+    /** 每个下载任务切成几段并发拉（1–32）。 */
+    val segmentCount: Int = 8,
+    /** 所有下载任务共用的连接上限（4–64），防止「多任务 × 多分段」把 PikPak 侧打爆。 */
+    val maxConnections: Int = 32,
 )
 
 /**
