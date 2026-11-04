@@ -5,6 +5,7 @@ import dev.piko.server.ChangeAccessTokenRequest
 import dev.piko.server.DownloadDirRequest
 import dev.piko.server.DownloadDirResponse
 import dev.piko.server.DownloadTuningRequest
+import dev.piko.server.DownloadTuningResponse
 import dev.piko.server.ServerConfig
 import dev.piko.server.ServiceGraph
 import dev.piko.server.ShareInfo
@@ -90,7 +91,7 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
         graph.connectionBudget.updateLimit(body.maxConnections)
         PikoLog.w(TAG, "下载并发已更新：来源=${call.remoteIp()}，每任务 ${body.segments} 段，" +
             "全局连接上限 ${body.maxConnections}（进行中的任务仍按启动时的段数）")
-        call.respond(HttpStatusCode.NoContent)
+        call.respond(DownloadTuningResponse(segments = body.segments, maxConnections = body.maxConnections))
     }
 
     get("/api/settings/shares") {

@@ -82,6 +82,13 @@ data class DownloadTuningRequest(
     val maxConnections: Int = 32,
 )
 
+/** 保存后的实际生效值；返回 200+JSON 而不是 204，前端可直接把回包当确认。 */
+@Serializable
+data class DownloadTuningResponse(
+    val segments: Int,
+    val maxConnections: Int,
+)
+
 @Serializable
 data class AuthStateResponse(
     val authenticated: Boolean,

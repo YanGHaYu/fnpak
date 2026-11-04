@@ -27,3 +27,9 @@ piko-log-*
 
 # 本机构建用的 Gradle 项目缓存目录
 .piko-gradle-cache-fork/
+
+# 前端构建链：依赖与中间产物不入库，只提交 server/src/main/resources/web 的构建产物
+web-ui/node_modules/
+web-ui/dist/
+web-ui/.vite/
+npm-debug.log*
