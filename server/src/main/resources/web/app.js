@@ -3,6 +3,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const els = {
+    health: $('health-badge'),
     badge: $('auth-badge'),
     loginPanel: $('login-panel'),
     drivePanel: $('drive-panel'),
@@ -133,6 +134,21 @@
     loadList();
   }
 
+  // 健康态独立于登录态：后端连不上时页面照样要能打开并说清原因
+  async function refreshHealth() {
+    try {
+      const result = await api('/api/health');
+      if (!result.ok || !result.data?.ok) throw new Error(`HTTP ${result.status}`);
+      const info = result.data;
+      els.health.className = 'badge ok';
+      els.health.textContent = `服务正常 ${info.version} · ${info.uptimeSeconds}s`;
+      els.health.title = `home: ${info.home}`;
+    } catch (error) {
+      els.health.className = 'badge off';
+      els.health.textContent = `服务异常：${error.message}`;
+    }
+  }
+
   async function refreshAuth() {
     const result = await api('/api/auth/state');
     if (!result.ok) {
@@ -189,5 +205,8 @@
   els.up.addEventListener('click', up);
   els.load.addEventListener('click', goToTypedId);
   renderCrumbs();
+  refreshHealth();
   refreshAuth();
+  // 健康态每 10s 刷新：用户能看见服务是否还活着
+  setInterval(refreshHealth, 10000);
 })();
