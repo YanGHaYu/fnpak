@@ -99,3 +99,11 @@ tr.folder td:first-child { color: var(--accent); cursor: pointer; }
 tr.folder td:first-child:hover { text-decoration: underline; }
 
 .error { color: var(--danger); margin: 10px 0 0; white-space: pre-wrap; }
+
+button.small { padding: 3px 9px; font-size: 12px; }
+.toolbar input.grow { flex: 1 1 320px; }
+.toolbar input.narrow { flex: 0 0 140px; }
+td.actions { white-space: nowrap; }
+td.state.ok { color: #7fd3a2; }
+td.state.error { color: var(--danger); }
+

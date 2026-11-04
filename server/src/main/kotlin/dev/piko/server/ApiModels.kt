@@ -73,6 +73,115 @@ data class ErrorResponse(val error: ErrorDetail)
 @Serializable
 data class ErrorDetail(val code: String, val message: String)
 
+// ---- 访问口令 ----
+
+@Serializable
+data class AccessLoginRequest(val passcode: String = "")
+
+@Serializable
+data class AccessStateResponse(val required: Boolean, val authenticated: Boolean)
+
+// ---- M2 链接解析与离线任务 ----
+
+@Serializable
+data class LinkParseRequest(val link: String = "", val passCode: String = "")
+
+@Serializable
+data class LinkFileItem(
+    val name: String,
+    val sizeBytes: Long,
+    /** 内容哈希；有它才能秒传/借出取流，直链探测通常为空。 */
+    val gcid: String? = null,
+    val instantReady: Boolean = false,
+)
+
+@Serializable
+data class LinkParseResponse(
+    /** `magnet` / `share` / `http`，前端据此提示后续能不能直接下载。 */
+    val kind: String,
+    val name: String,
+    /** 分享里的子目录超过展开上限，文件列表不完整。 */
+    val truncated: Boolean = false,
+    /** 分享的提取码令牌，交给保存步骤使用；不含用户口令。 */
+    val passCodeToken: String? = null,
+    val files: List<LinkFileItem>,
+)
+
+@Serializable
+data class LinkSaveRequest(val link: String = "", val parentId: String = "")
+
+@Serializable
+data class LinkSaveResponse(
+    /** 排进离线队列时的任务 ID；秒传直接完成时为空。 */
+    val taskId: String? = null,
+    val instantComplete: Boolean = false,
+    /** 离线提交即完成时的产出的文件 ID。 */
+    val fileId: String? = null,
+)
+
+@Serializable
+data class OfflineTaskItem(
+    val id: String,
+    val phase: String,
+    /** 服务端给的百分比，0..100。 */
+    val progress: Int,
+    val fileId: String = "",
+    val fileSize: Long = 0,
+    val message: String = "",
+    val sourceUrl: String = "",
+)
+
+@Serializable
+data class OfflineTaskListResponse(val items: List<OfflineTaskItem>, val nextPageToken: String = "")
+
+// ---- 本机下载 ----
+
+@Serializable
+data class DownloadItem(
+    val id: String,
+    val fileName: String,
+    val fileId: String,
+    val bytesDone: Long,
+    val bytesTotal: Long,
+    /** 0..100，一位小数。 */
+    val percent: Double,
+    val speedBytesPerSec: Long,
+    val status: String,
+    val error: String? = null,
+    val path: String = "",
+)
+
+@Serializable
+data class DownloadListResponse(val items: List<DownloadItem>)
+
+@Serializable
+data class StartDownloadRequest(val fileId: String = "")
+
+// ---- SSE 事件 ----
+
+@Serializable
+data class DownloadProgressEvent(
+    val id: String,
+    val fileName: String,
+    val bytesDone: Long,
+    val bytesTotal: Long,
+    /** 0..100。 */
+    val percent: Double,
+    val speedBytesPerSec: Long,
+    val status: String,
+)
+
+@Serializable
+data class TaskProgressEvent(
+    val id: String,
+    val phase: String,
+    /** 0..100。 */
+    val progress: Int,
+    val fileId: String = "",
+    val message: String = "",
+)
+
+
 /** 统一错误体 `{"error":{"code","message"}}`，前端按 code 分支，不看文案。 */
 suspend fun ApplicationCall.respondError(status: HttpStatusCode, code: String, message: String) {
     respond(status, ErrorResponse(ErrorDetail(code, message)))

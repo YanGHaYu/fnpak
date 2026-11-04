@@ -1,17 +1,21 @@
-// Piko 服务端 M1 页面：导入令牌 → 列目录。
-// 不引框架、不依赖 CDN；所有请求都走同源的 /api。
+// Piko 服务端 M2 页面：访问口令 → 导入令牌 → 列目录 / 链接解析 / 本机下载。
+// 不引框架、不依赖 CDN；所有请求走同源的 /api，会话靠 HttpOnly Cookie。
 (() => {
   const $ = (id) => document.getElementById(id);
   const els = {
     health: $('health-badge'),
     badge: $('auth-badge'),
+    accessPanel: $('access-panel'),
+    accessForm: $('access-form'),
+    passcode: $('passcode'),
+    accessError: $('access-error'),
     loginPanel: $('login-panel'),
-    drivePanel: $('drive-panel'),
     form: $('token-form'),
     account: $('account'),
     accessToken: $('accessToken'),
     refreshToken: $('refreshToken'),
     loginError: $('login-error'),
+    drivePanel: $('drive-panel'),
     up: $('up'),
     parentId: $('parent-id'),
     load: $('load'),
@@ -19,16 +23,45 @@
     path: $('path'),
     status: $('status'),
     items: $('items'),
+    linksPanel: $('links-panel'),
+    linkInput: $('link-input'),
+    passCode: $('pass-code'),
+    parse: $('parse'),
+    linkStatus: $('link-status'),
+    linkItems: $('link-items'),
+    saveOffline: $('save-offline'),
+    saveStatus: $('save-status'),
+    downPanel: $('down-panel'),
+    refreshDowns: $('refresh-downs'),
+    downItems: $('down-items'),
+    tasksPanel: $('tasks-panel'),
+    refreshTasks: $('refresh-tasks'),
+    taskItems: $('task-items'),
   };
 
-  // 面包屑：第一项固定是根目录（id 为空串，SDK 的根目录约定）
   let crumbs = [{ id: '', name: '根目录' }];
-
+  let parsedLink = null;
+  let eventSource = null;
   const currentParentId = () => crumbs[crumbs.length - 1].id;
+
+  function showAccess(message) {
+    els.accessPanel.hidden = false;
+    els.loginPanel.hidden = true;
+    els.drivePanel.hidden = true;
+    els.linksPanel.hidden = true;
+    els.downPanel.hidden = true;
+    els.tasksPanel.hidden = true;
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    els.accessError.textContent = message || '';
+    els.accessError.hidden = !message;
+    els.badge.className = 'badge pending';
+    els.badge.textContent = '需要访问口令';
+  }
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
       ...options,
     });
     let data = null;
@@ -38,12 +71,14 @@
         try { data = JSON.parse(text); } catch (_) { data = null; }
       }
     }
+    // 口令失效统一收敛：所有面板都退回口令卡片，避免每个调用点各自处理
+    if (response.status === 401 && data?.error?.code === 'access_denied') {
+      showAccess('访问口令已失效，请重新输入');
+    }
     return { ok: response.ok, status: response.status, data };
   }
 
-  function errorText(result) {
-    return result.data?.error?.message || `请求失败（HTTP ${result.status}）`;
-  }
+  const errorText = (result) => result.data?.error?.message || `请求失败（HTTP ${result.status}）`;
 
   function formatSize(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return '';
@@ -54,11 +89,87 @@
     return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
   }
 
-  function typeOf(item) {
-    if (item.isFolder) return '目录';
-    if (item.isVideo) return '视频';
-    return item.mimeType || '文件';
+  function formatSpeed(bytes) {
+    return bytes > 0 ? `${formatSize(bytes)}/s` : '—';
   }
+
+  const typeOf = (item) => item.isFolder ? '目录' : item.isVideo ? '视频' : (item.mimeType || '文件');
+
+  // ---------- 访问口令 ----------
+
+  async function refreshAccess() {
+    const result = await api('/api/access/state');
+    if (!result.ok || !result.data?.authenticated) { showAccess(); return false; }
+    els.accessPanel.hidden = true;
+    return true;
+  }
+
+  els.accessForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    els.accessError.hidden = true;
+    const result = await api('/api/access/login', {
+      method: 'POST',
+      body: JSON.stringify({ passcode: els.passcode.value.trim() }),
+    });
+    if (!result.ok) {
+      els.accessError.textContent = errorText(result);
+      els.accessError.hidden = false;
+      return;
+    }
+    els.passcode.value = '';
+    await boot();
+  });
+
+  // ---------- 健康态与登录态 ----------
+
+  async function refreshHealth() {
+    try {
+      const result = await api('/api/health');
+      if (!result.ok || !result.data?.ok) throw new Error(`HTTP ${result.status}`);
+      els.health.className = 'badge ok';
+      els.health.textContent = `服务正常 ${result.data.version} · ${result.data.uptimeSeconds}s`;
+      els.health.title = `home: ${result.data.home}`;
+    } catch (error) {
+      els.health.className = 'badge off';
+      els.health.textContent = `服务异常：${error.message}`;
+    }
+  }
+
+  async function refreshAuth() {
+    const result = await api('/api/auth/state');
+    if (!result.ok) {
+      if (result.status !== 401) {
+        els.badge.className = 'badge off';
+        els.badge.textContent = '无法获取状态';
+      }
+      return;
+    }
+    const state = result.data;
+    if (state.authenticated) {
+      els.badge.className = 'badge ok';
+      els.badge.textContent = `已登录：${state.displayName || state.account}`;
+      els.loginPanel.hidden = true;
+      els.drivePanel.hidden = false;
+      els.linksPanel.hidden = false;
+      els.downPanel.hidden = false;
+      els.tasksPanel.hidden = false;
+      await loadList();
+      await loadDownloads();
+      await loadTasks();
+      openEvents();
+    } else {
+      els.badge.className = 'badge pending';
+      els.badge.textContent = state.initializing ? '恢复登录态…' : '未登录';
+      els.drivePanel.hidden = true;
+      els.linksPanel.hidden = true;
+      els.downPanel.hidden = true;
+      els.tasksPanel.hidden = true;
+      els.loginPanel.hidden = false;
+      if (state.initializing) setTimeout(refreshAuth, 1000);
+    }
+  }
+
+  // ---------- 目录 ----------
 
   function renderCrumbs() {
     els.path.textContent = '/' + crumbs.slice(1).map((c) => c.name).join('/');
@@ -71,7 +182,7 @@
     if (!items.length) {
       const row = document.createElement('tr');
       const cell = document.createElement('td');
-      cell.colSpan = 3;
+      cell.colSpan = 4;
       cell.className = 'muted';
       cell.textContent = '这个目录是空的';
       row.appendChild(cell);
@@ -95,7 +206,17 @@
       kind.className = 'muted';
       kind.textContent = typeOf(item);
 
-      row.append(name, size, kind);
+      const actions = document.createElement('td');
+      if (!item.isFolder) {
+        const download = document.createElement('button');
+        download.type = 'button';
+        download.className = 'secondary small';
+        download.textContent = '下载';
+        download.addEventListener('click', () => startDownload(item.id, download));
+        actions.appendChild(download);
+      }
+
+      row.append(name, size, kind, actions);
       els.items.appendChild(row);
     }
   }
@@ -111,16 +232,12 @@
     const items = result.data?.items || [];
     renderCrumbs();
     renderItems(items);
-    const next = result.data?.nextPageToken;
-    els.status.textContent = next
-      ? `${items.length} 项（还有下一页，M1 页面暂不翻页）`
+    els.status.textContent = result.data?.nextPageToken
+      ? `${items.length} 项（还有下一页，页面暂不翻页）`
       : `${items.length} 项`;
   }
 
-  function enter(item) {
-    crumbs = [...crumbs, { id: item.id, name: item.name }];
-    loadList();
-  }
+  function enter(item) { crumbs = [...crumbs, { id: item.id, name: item.name }]; loadList(); }
 
   function up() {
     if (crumbs.length === 1) return;
@@ -134,43 +251,183 @@
     loadList();
   }
 
-  // 健康态独立于登录态：后端连不上时页面照样要能打开并说清原因
-  async function refreshHealth() {
-    try {
-      const result = await api('/api/health');
-      if (!result.ok || !result.data?.ok) throw new Error(`HTTP ${result.status}`);
-      const info = result.data;
-      els.health.className = 'badge ok';
-      els.health.textContent = `服务正常 ${info.version} · ${info.uptimeSeconds}s`;
-      els.health.title = `home: ${info.home}`;
-    } catch (error) {
-      els.health.className = 'badge off';
-      els.health.textContent = `服务异常：${error.message}`;
+  // ---------- 链接解析 / 离线任务 ----------
+
+  function renderParsedFiles(data) {
+    els.linkItems.replaceChildren();
+    const files = data?.files || [];
+    if (!files.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 3;
+      cell.className = 'muted';
+      cell.textContent = '没有解析出文件';
+      row.appendChild(cell);
+      els.linkItems.appendChild(row);
+      return;
+    }
+    for (const file of files) {
+      const row = document.createElement('tr');
+      const name = document.createElement('td');
+      name.textContent = file.name;
+      const size = document.createElement('td');
+      size.className = 'num';
+      size.textContent = formatSize(file.sizeBytes);
+      const ready = document.createElement('td');
+      ready.className = 'muted';
+      ready.textContent = file.instantReady ? '可秒传' : '需离线下载';
+      row.append(name, size, ready);
+      els.linkItems.appendChild(row);
     }
   }
 
-  async function refreshAuth() {
-    const result = await api('/api/auth/state');
+  els.parse.addEventListener('click', async () => {
+    const link = els.linkInput.value.trim();
+    if (!link) { els.linkStatus.textContent = '先填链接'; return; }
+    els.parse.disabled = true;
+    els.linkStatus.textContent = '解析中…';
+    els.saveOffline.disabled = true;
+    parsedLink = null;
+    const result = await api('/api/links/parse', {
+      method: 'POST',
+      body: JSON.stringify({ link, passCode: els.passCode.value.trim() }),
+    });
+    els.parse.disabled = false;
     if (!result.ok) {
-      els.badge.className = 'badge off';
-      els.badge.textContent = '无法获取状态';
+      els.linkStatus.textContent = errorText(result);
+      els.linkItems.replaceChildren();
       return;
     }
-    const state = result.data;
-    if (state.authenticated) {
-      els.badge.className = 'badge ok';
-      els.badge.textContent = `已登录：${state.displayName || state.account}`;
-      els.loginPanel.hidden = true;
-      els.drivePanel.hidden = false;
-      await loadList();
-    } else {
-      els.badge.className = 'badge pending';
-      els.badge.textContent = state.initializing ? '恢复登录态…' : '未登录';
-      els.drivePanel.hidden = true;
-      els.loginPanel.hidden = false;
-      if (state.initializing) setTimeout(refreshAuth, 1000);
+    parsedLink = { link, kind: result.data.kind };
+    const kindText = result.data.kind === 'magnet' ? '磁力' : result.data.kind === 'share' ? '分享' : '直链';
+    els.linkStatus.textContent = `${kindText} · ${result.data.name || '未命名'} · ${(result.data.files || []).length} 个文件` +
+      (result.data.truncated ? '（目录更深，列表不完整）' : '');
+    renderParsedFiles(result.data);
+    els.saveOffline.disabled = false;
+  });
+
+  els.saveOffline.addEventListener('click', async () => {
+    if (!parsedLink) return;
+    els.saveOffline.disabled = true;
+    els.saveStatus.textContent = '提交中…';
+    const result = await api('/api/links/save', {
+      method: 'POST',
+      body: JSON.stringify({ link: parsedLink.link, parentId: currentParentId() }),
+    });
+    if (!result.ok) {
+      els.saveStatus.textContent = errorText(result);
+      els.saveOffline.disabled = false;
+      return;
     }
+    els.saveStatus.textContent = result.data.instantComplete
+      ? `已秒传，文件 ID：${result.data.fileId || '（未知）'}`
+      : `已提交离线任务：${result.data.taskId || '（无任务 ID）'}`;
+    await loadTasks();
+  });
+
+  // ---------- 本机下载 ----------
+
+  const downRows = new Map();
+
+  function upsertDownload(item) {
+    let row = downRows.get(item.id);
+    if (!row) {
+      row = document.createElement('tr');
+      row.innerHTML = '<td class="name"></td><td class="num pct"></td><td class="num speed"></td>' +
+        '<td class="state"></td><td class="actions"></td>';
+      const name = row.querySelector('.name');
+      name.title = item.fileId;
+      row.querySelector('.actions').append(
+        makeButton('暂停', () => downloadAction(item.id, 'pause')),
+        makeButton('继续', () => downloadAction(item.id, 'resume', 'secondary')),
+        makeButton('取消', () => downloadAction(item.id, 'cancel', 'danger')),
+      );
+      downRows.set(item.id, row);
+      els.downItems.appendChild(row);
+    }
+    row.querySelector('.name').textContent = item.fileName;
+    row.querySelector('.pct').textContent = `${item.percent}% · ${formatSize(item.bytesDone)}/${formatSize(item.bytesTotal)}`;
+    row.querySelector('.speed').textContent = formatSpeed(item.speedBytesPerSec);
+    const stateCell = row.querySelector('.state');
+    stateCell.textContent = item.error ? `${item.status}：${item.error}` : item.status;
+    stateCell.className = 'state ' + (item.status === 'FAILED' ? 'error' : item.status === 'COMPLETED' ? 'ok' : 'muted');
   }
+
+  function makeButton(text, onClick, kind) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = text;
+    button.className = `small ${kind || ''}`.trim();
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  async function loadDownloads() {
+    const result = await api('/api/downloads');
+    if (!result.ok) return;
+    downRows.clear();
+    els.downItems.replaceChildren();
+    (result.data?.items || []).forEach(upsertDownload);
+  }
+
+  async function downloadAction(id, action) {
+    const result = await api(`/api/downloads/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+    if (!result.ok) return;
+    (result.data?.items || []).forEach(upsertDownload);
+  }
+
+  async function startDownload(fileId, button) {
+    button.disabled = true;
+    const result = await api('/api/downloads', { method: 'POST', body: JSON.stringify({ fileId }) });
+    button.disabled = false;
+    if (!result.ok) {
+      els.status.textContent = errorText(result);
+      return;
+    }
+    (result.data?.items || []).forEach(upsertDownload);
+  }
+
+  // ---------- 离线任务 ----------
+
+  const taskRows = new Map();
+
+  function upsertTask(item) {
+    let row = taskRows.get(item.id);
+    if (!row) {
+      row = document.createElement('tr');
+      row.innerHTML = '<td class="id"></td><td class="num pct"></td><td class="phase"></td><td class="msg"></td>';
+      row.querySelector('.id').textContent = item.id;
+      taskRows.set(item.id, row);
+      els.taskItems.appendChild(row);
+    }
+    row.querySelector('.pct').textContent = `${item.progress}%`;
+    row.querySelector('.phase').textContent = item.phase;
+    row.querySelector('.msg').textContent = item.message || '';
+  }
+
+  async function loadTasks() {
+    const result = await api('/api/tasks');
+    if (!result.ok) return;
+    taskRows.clear();
+    els.taskItems.replaceChildren();
+    (result.data?.items || []).forEach(upsertTask);
+  }
+
+  // ---------- SSE ----------
+
+  function openEvents() {
+    if (eventSource) return;
+    eventSource = new EventSource('/api/events');
+    eventSource.addEventListener('download.progress', (event) => {
+      try { upsertDownload(JSON.parse(event.data)); } catch (_) { /* 忽略坏帧 */ }
+    });
+    eventSource.addEventListener('task.progress', (event) => {
+      try { upsertTask(JSON.parse(event.data)); } catch (_) { /* 忽略坏帧 */ }
+    });
+    // 断线由 EventSource 自带重连；重连后后端会先推当前快照
+  }
+
+  // ---------- 绑定 ----------
 
   els.form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -204,9 +461,17 @@
 
   els.up.addEventListener('click', up);
   els.load.addEventListener('click', goToTypedId);
+  els.refreshDowns.addEventListener('click', loadDownloads);
+  els.refreshTasks.addEventListener('click', loadTasks);
+
+  async function boot() {
+    refreshHealth();
+    if (!(await refreshAccess())) return;
+    await refreshAuth();
+  }
+
   renderCrumbs();
-  refreshHealth();
-  refreshAuth();
+  boot();
   // 健康态每 10s 刷新：用户能看见服务是否还活着
   setInterval(refreshHealth, 10000);
 })();

@@ -1,35 +1,99 @@
 package dev.piko.server.events
 
+import dev.piko.server.DownloadProgressEvent
+import dev.piko.server.ServiceGraph
+import dev.piko.server.TaskProgressEvent
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
+import kotlin.math.roundToLong
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 private const val HEARTBEAT_SECONDS = 15L
+private const val TASK_POLL_SECONDS = 3L
+private val json = Json { encodeDefaults = true }
 
 /**
- * SSE 通道。M1 只发心跳：SSE 代理（nginx / fnOS 的网关）会在空闲一段时间后掐断连接，
- * 定期发注释行能保活，也让前端知道服务端还活着。
+ * SSE 通道：`download.progress` + `task.progress` + 心跳。
  *
- * M2 起在这里挂 `download.progress` / `task.progress` / `notice` 事件；用 `PikoDownloadCoordinator`
- * 与 `TaskRepository` 的 Flow 汇总后按 1~2 秒节流推送，不要每字节一条。
+ * 多个来源（下载任务 StateFlow、离线任务轮询、心跳）都写进同一个 [Channel]，由单协程顺序写，
+ * 避免并发写同一 Writer。格式严格 `event: <name>\ndata: <json>\n\n`；注释行只用于保活。
  *
- * 这里不用 `ktor-server-sse` 插件：M1 只有心跳，手写 `text/event-stream` 不依赖插件 API 版本差异；
- * 依赖已声明，M2 接类型化事件时直接换成 `sse(...)`。
+ * 客户端断开时调用被取消，[coroutineScope] 连带取消子协程，不留下轮询任务；重连后先推当前快照。
  */
-fun Route.sseRoutes() {
+fun Route.sseRoutes(graph: ServiceGraph) {
     get("/api/events") {
         call.respondTextWriter(ContentType.Text.EventStream, HttpStatusCode.OK) {
-            // 注释行（以冒号开头）是合法 SSE，EventSource 会忽略内容，仅用于保活
             write(": connected\n\n")
             flush()
-            while (true) {
-                delay(HEARTBEAT_SECONDS * 1000)
-                write(": heartbeat ${System.currentTimeMillis()}\n\n")
-                flush()
+            coroutineScope {
+                val events = Channel<String>(Channel.UNLIMITED)
+                launch { streamDownloads(graph, events) }
+                launch { streamTasks(graph, events) }
+                launch {
+                    while (true) {
+                        delay(HEARTBEAT_SECONDS * 1000)
+                        events.send(": heartbeat ${System.currentTimeMillis()}\n\n")
+                    }
+                }
+                for (event in events) {
+                    write(event)
+                    flush()
+                }
             }
         }
+    }
+}
+
+/** 本机下载：按任务 ID 去抖，同一任务同一进度只发一次。 */
+private suspend fun streamDownloads(graph: ServiceGraph, out: SendChannel<String>) {
+    val sent = mutableMapOf<String, String>()
+    graph.downloadCoordinator.tasks.collect { tasks ->
+        for (task in tasks.values) {
+            val stamp = "${task.downloadedBytes}/${task.totalBytes}/${task.status}/${task.speedBytesPerSec}"
+            if (sent[task.taskId] == stamp) continue
+            sent[task.taskId] = stamp
+            val event = DownloadProgressEvent(
+                id = task.taskId,
+                fileName = task.displayName,
+                bytesDone = task.downloadedBytes,
+                bytesTotal = task.totalBytes,
+                percent = (task.progress.toDouble() * 1000).roundToLong() / 10.0,
+                speedBytesPerSec = task.speedBytesPerSec,
+                status = task.status.name,
+            )
+            out.send("event: download.progress\ndata: ${json.encodeToString(event)}\n\n")
+        }
+    }
+}
+
+/** 离线任务：仓库没有 Flow，按固定间隔轮询，只在 phase/progress 变化时推送。 */
+private suspend fun streamTasks(graph: ServiceGraph, out: SendChannel<String>) {
+    val sent = mutableMapOf<String, String>()
+    while (true) {
+        if (graph.isAuthenticated) {
+            graph.taskRepository.getTasks().getOrNull()?.tasks?.forEach { task ->
+                val stamp = "${task.phase}/${task.progress}"
+                if (sent[task.id] == stamp) return@forEach
+                sent[task.id] = stamp
+                val event = TaskProgressEvent(
+                    id = task.id,
+                    phase = task.phase,
+                    progress = task.progress,
+                    fileId = task.fileId,
+                    message = task.message.orEmpty(),
+                )
+                out.send("event: task.progress\ndata: ${json.encodeToString(event)}\n\n")
+            }
+        }
+        delay(TASK_POLL_SECONDS * 1000)
     }
 }
