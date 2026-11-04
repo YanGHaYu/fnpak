@@ -28,6 +28,10 @@ dependencies {
     // M1 只用原始 text/event-stream 发心跳；插件留给 M2 的类型化事件
     implementation(libs.ktor.server.sse)
     implementation(libs.ktor.serialization.kotlinx.json)
+    // SDK 的 PikPakClient 用 Ktor HttpClient 调 PikPak API，需要 JVM 客户端引擎
+    implementation(libs.ktor.client.okhttp)
+    // :shared 的 PikoLocale 等用到 Compose runtime；exclude 掉空壳 runtime-desktop 后需显式补回 androidx 的实现
+    implementation("androidx.compose.runtime:runtime-desktop:1.12.0")
 }
 
 // 同 :cli：:shared 的 api 依赖带进 org.jetbrains.compose.runtime:runtime-desktop，

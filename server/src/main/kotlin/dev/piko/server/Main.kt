@@ -64,8 +64,8 @@ fun Application.installServer(graph: ServiceGraph) {
         }
         authRoutes(graph)
         driveRoutes(graph)
-        mediaRoutes(graph)
-        sseRoutes(graph)
+        mediaRoutes()
+        sseRoutes()
         staticRoutes()
     }
 }

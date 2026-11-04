@@ -60,19 +60,23 @@ fun Route.driveRoutes(graph: ServiceGraph) {
     }
 }
 
-private fun FileStat.toItem(): FileItem = FileItem(
-    id = id,
-    parentId = parentId,
-    name = name,
-    kind = kind,
-    sizeBytes = sizeBytes,
-    isFolder = isFolder,
-    // 不引入 mediamp：视频判定只看 MIME 与时长，播放交给浏览器
-    isVideo = isVideoLike(mimeType, durationMillis),
-    durationMs = durationMillis?.takeIf { it > 0 },
-    hash = hash,
-    mimeType = mimeType,
-)
+private fun FileStat.toItem(): FileItem {
+    // 时长放在 params["duration"]（秒）；SDK 2.5.0 没有 durationMillis 属性
+    val durationMs = params["duration"]?.toDoubleOrNull()?.let { (it * 1000).toLong() }?.takeIf { it > 0 }
+    return FileItem(
+        id = id,
+        parentId = parentId,
+        name = name,
+        kind = kind,
+        sizeBytes = sizeBytes,
+        isFolder = isFolder,
+        // 不引入 mediamp：视频判定只看 MIME 与时长，播放交给浏览器
+        isVideo = isVideoLike(mimeType, durationMs),
+        durationMs = durationMs,
+        hash = hash,
+        mimeType = mimeType,
+    )
+}
 
 private fun FileDetail.toResponse(): FileDetailResponse = FileDetailResponse(
     id = id,
