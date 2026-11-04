@@ -24,7 +24,7 @@ data class AuthStateResponse(
     val account: String? = null,
     val displayName: String? = null,
     val initializing: Boolean,
-    /** M1 固定 false：还没有验证码登录，只能导入令牌。 */
+    /** 仅在同一账号上一次登录被要求验证码时有意义；前端主要按登录接口的 401 分支处理。 */
     val needsCaptcha: Boolean = false,
 )
 
@@ -33,6 +33,43 @@ data class TokenImportRequest(
     val account: String = "",
     val accessToken: String = "",
     val refreshToken: String = "",
+)
+
+// ---- 账号密码登录与验证码 ----
+
+@Serializable
+data class LoginRequest(
+    val account: String = "",
+    val password: String = "",
+    /** 由验证码初始化接口下发；一次性使用，过期或已用过都会被拒绝。 */
+    val challengeId: String = "",
+    /** PikPak 当前的验证码是风控令牌而非图片，本字段保留给未来图片挑战，当前不使用。 */
+    val captchaAnswer: String = "",
+)
+
+@Serializable
+data class CaptchaInitRequest(val account: String = "")
+
+@Serializable
+data class CaptchaInitResponse(
+    val challengeId: String,
+    val expiresInSec: Long,
+    /** `risk_token`：PikPak 下发的是不可读的风控令牌，没有图片；保留字段以便未来切换为图片挑战。 */
+    val captchaType: String = "risk_token",
+    /** 有图片挑战时是 `data:image/...;base64,...`；当前为 null。 */
+    val imageDataUrl: String? = null,
+    val note: String = "",
+)
+
+/** 登录需要验证码时的 401 响应：既带统一错误体，也带新的挑战供前端重试。 */
+@Serializable
+data class CaptchaRequiredResponse(
+    val error: ErrorDetail,
+    val challengeId: String,
+    val expiresInSec: Long,
+    val captchaType: String = "risk_token",
+    val imageDataUrl: String? = null,
+    val note: String = "",
 )
 
 @Serializable

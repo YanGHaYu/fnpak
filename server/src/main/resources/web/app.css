@@ -100,6 +100,16 @@ tr.folder td:first-child:hover { text-decoration: underline; }
 
 .error { color: var(--danger); margin: 10px 0 0; white-space: pre-wrap; }
 
+.captcha { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.captcha img {
+  display: block;
+  max-width: 100%;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
 button.small { padding: 3px 9px; font-size: 12px; }
 .toolbar input.grow { flex: 1 1 320px; }
 .toolbar input.narrow { flex: 0 0 140px; }

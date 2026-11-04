@@ -9,6 +9,17 @@
     accessForm: $('access-form'),
     passcode: $('passcode'),
     accessError: $('access-error'),
+    signinPanel: $('signin-panel'),
+    signinForm: $('signin-form'),
+    signinAccount: $('signin-account'),
+    signinPassword: $('signin-password'),
+    signinError: $('signin-error'),
+    captchaBox: $('captcha-box'),
+    captchaImage: $('captcha-image'),
+    captchaNote: $('captcha-note'),
+    captchaAnswer: $('captcha-answer'),
+    captchaRefresh: $('captcha-refresh'),
+    captchaTtl: $('captcha-ttl'),
     loginPanel: $('login-panel'),
     form: $('token-form'),
     account: $('account'),
@@ -42,11 +53,15 @@
   let crumbs = [{ id: '', name: '根目录' }];
   let parsedLink = null;
   let eventSource = null;
+  // 当前验证码挑战；为空表示这次登录不需要（或还没申请）
+  let signinChallenge = null;
   const currentParentId = () => crumbs[crumbs.length - 1].id;
 
   function showAccess(message) {
     els.accessPanel.hidden = false;
+    els.signinPanel.hidden = true;
     els.loginPanel.hidden = true;
+    hideCaptcha();
     els.drivePanel.hidden = true;
     els.linksPanel.hidden = true;
     els.downPanel.hidden = true;
@@ -120,6 +135,100 @@
     await boot();
   });
 
+  // ---------- 账号密码登录 + 验证码 ----------
+  //
+  // PikPak 的验证码是服务端风控令牌而不是图片：接口仍按 {challengeId, imageDataUrl, expiresInSec}
+  // 返回，imageDataUrl 目前恒为 null；将来换成图片挑战时，前端不用改就能把图显示出来。
+
+  function hideCaptcha() {
+    els.captchaBox.hidden = true;
+    els.captchaImage.hidden = true;
+    els.captchaImage.removeAttribute('src');
+    els.captchaAnswer.value = '';
+    els.captchaTtl.textContent = '';
+    signinChallenge = null;
+  }
+
+  function applyCaptcha(data) {
+    signinChallenge = { id: data.challengeId };
+    els.captchaBox.hidden = false;
+    els.captchaNote.textContent = data.note || '';
+    els.captchaTtl.textContent = `挑战有效约 ${data.expiresInSec} 秒`;
+    els.captchaAnswer.placeholder = data.imageDataUrl ? '输入图片里的字符' : '当前没有图片，可留空';
+    if (data.imageDataUrl) {
+      els.captchaImage.src = data.imageDataUrl;
+      els.captchaImage.hidden = false;
+    } else {
+      els.captchaImage.hidden = true;
+      els.captchaImage.removeAttribute('src');
+    }
+  }
+
+  function showSigninError(message, visible = true) {
+    els.signinError.textContent = message || '';
+    els.signinError.hidden = !visible || !message;
+  }
+
+  async function refreshCaptcha() {
+    const account = els.signinAccount.value.trim();
+    if (!account) {
+      showSigninError('先填账号，再刷新验证码');
+      return;
+    }
+    els.captchaRefresh.disabled = true;
+    const result = await api('/api/auth/captcha/init', {
+      method: 'POST',
+      body: JSON.stringify({ account }),
+    });
+    els.captchaRefresh.disabled = false;
+    if (!result.ok) {
+      showSigninError(errorText(result));
+      return;
+    }
+    applyCaptcha(result.data);
+    showSigninError('', false);
+  }
+
+  els.signinForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const account = els.signinAccount.value.trim();
+    const password = els.signinPassword.value;
+    if (!account || !password) {
+      showSigninError('账号与密码都要填');
+      return;
+    }
+    showSigninError('', false);
+    els.signinPanel.querySelector('button[type="submit"]').disabled = true;
+    const body = { account, password };
+    if (signinChallenge) {
+      body.challengeId = signinChallenge.id;
+      body.captchaAnswer = els.captchaAnswer.value.trim();
+    }
+    const result = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(body) });
+    els.signinPanel.querySelector('button[type="submit"]').disabled = false;
+    if (result.ok) {
+      els.signinPassword.value = '';
+      hideCaptcha();
+      els.signinForm.reset();
+      crumbs = [{ id: '', name: '根目录' }];
+      await refreshAuth();
+      return;
+    }
+    const code = result.data?.error?.code;
+    if (result.status === 401 && code === 'captcha_required') {
+      // 服务端已经申请了新的挑战，直接展示并让用户重试（没有图片时留空即可）
+      applyCaptcha(result.data);
+      showSigninError(result.data.error.message);
+      return;
+    }
+    // 挑战用过/过期后不能再用，下次提交不带 challengeId，由服务端按需重新下发
+    hideCaptcha();
+    showSigninError(result.data?.error?.message || `登录失败（HTTP ${result.status}）`);
+  });
+
+  els.captchaRefresh.addEventListener('click', refreshCaptcha);
+  els.captchaImage.addEventListener('click', refreshCaptcha);
+
   // ---------- 健康态与登录态 ----------
 
   async function refreshHealth() {
@@ -148,6 +257,8 @@
     if (state.authenticated) {
       els.badge.className = 'badge ok';
       els.badge.textContent = `已登录：${state.displayName || state.account}`;
+      els.signinPanel.hidden = true;
+      hideCaptcha();
       els.loginPanel.hidden = true;
       els.drivePanel.hidden = false;
       els.linksPanel.hidden = false;
@@ -164,6 +275,8 @@
       els.linksPanel.hidden = true;
       els.downPanel.hidden = true;
       els.tasksPanel.hidden = true;
+      els.signinPanel.hidden = false;
+      els.signinAccount.value = state.account || els.signinAccount.value;
       els.loginPanel.hidden = false;
       if (state.initializing) setTimeout(refreshAuth, 1000);
     }

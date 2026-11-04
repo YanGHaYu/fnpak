@@ -1,5 +1,8 @@
 package dev.piko.server
 
+import dev.piko.server.auth.CaptchaChallengeStore
+import dev.piko.server.auth.LoginAttemptLimiter
+import dev.piko.server.auth.PikPakCaptchaClient
 import dev.piko.server.download.ServerDownloadStorage
 import dev.piko.server.download.ServerPreferences
 import dev.piko.shared.auth.DesktopSessionStore
@@ -44,6 +47,14 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     val clientManager: PikoClientManager = PikoClientManager(sessionStore, scope)
 
+    /** 登录限流与验证码挑战：只在本进程内，重启后清零。 */
+    val loginLimiter = LoginAttemptLimiter()
+
+    val captchaChallenges = CaptchaChallengeStore()
+
+    /** 直接向 PikPak 申请风控验证码令牌；昵称与密码都不经过它。 */
+    val captchaClient = PikPakCaptchaClient(config.home)
+
     val driveRepository: PikoDriveRepository = PikoDriveRepository(clientManager)
 
     val instantRepository: InstantMagnetRepository = InstantMagnetRepository(clientManager)
@@ -81,6 +92,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         downloadCoordinator.pauseAll()
         runBlocking { withTimeoutOrNull(3_000) { runCatching { downloadCoordinator.flushPersistence() } } }
         runCatching { clientManager.currentClient.value?.close() }
+        runCatching { captchaClient.close() }
         scope.cancel()
     }
 }

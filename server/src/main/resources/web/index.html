@@ -31,8 +31,37 @@
     <p class="hint">这道门只挡同网段随手打开页面的人；对外暴露请交给 fnOS 反向代理 + 强口令。</p>
   </section>
 
+  <section id="signin-panel" class="card" hidden>
+    <h2>账号登录</h2>
+    <p class="hint">
+      用 PikPak 账号的邮箱与密码登录。密码只随本次请求转发给 PikPak，既不会写进页面，也不会进服务端日志。
+      登录成功后会话写入数据目录，重启服务仍保持登录。
+    </p>
+    <form id="signin-form" autocomplete="off">
+      <label>邮箱 / 手机号
+        <input id="signin-account" placeholder="name@example.com" required>
+      </label>
+      <label>密码
+        <input id="signin-password" type="password" required>
+      </label>
+      <button id="signin-submit" type="submit">登录</button>
+      <p id="signin-error" class="error" hidden></p>
+    </form>
+    <div id="captcha-box" class="captcha" hidden>
+      <img id="captcha-image" alt="验证码（点击刷新）" title="点击刷新验证码" hidden>
+      <p id="captcha-note" class="hint"></p>
+      <label>验证码答案（有图片时填写）
+        <input id="captcha-answer" autocomplete="off" placeholder="当前没有图片，可留空">
+      </label>
+      <div class="toolbar">
+        <button id="captcha-refresh" type="button" class="secondary">刷新验证码</button>
+        <span id="captcha-ttl" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
   <section id="login-panel" class="card" hidden>
-    <h2>导入令牌</h2>
+    <h2>或导入令牌</h2>
     <p class="hint">
       在已登录的 Piko 桌面客户端里取得 <code>accessToken</code> 与
       <code>refreshToken</code>，粘贴到这里；服务端会把会话写进 <code>piko.home</code>，后续由 SDK 自动刷新。
