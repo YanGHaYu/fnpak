@@ -5,7 +5,7 @@
       <slot name="trigger">
         <button
           type="button"
-          class="inline-flex h-11 w-11 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none md:h-8 md:w-8"
+          class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none md:h-8 md:w-8"
           :title="`${label}：更多操作`"
           :aria-label="`${label}：更多操作`"
           :aria-expanded="String(open)"

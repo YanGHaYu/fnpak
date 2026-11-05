@@ -35,7 +35,9 @@
             </span>
 
             <div class="min-w-0">
-              <p class="truncate text-sm font-medium" :class="{ 'font-mono': !row.isFolder }">{{ row.name || row.id }}</p>
+              <ScrollName :label="row.name || row.id">
+                <p class="truncate text-sm font-medium" :class="{ 'font-mono': !row.isFolder }">{{ row.name || row.id }}</p>
+              </ScrollName>
               <p class="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted md:hidden">
                 <span>{{ row.isFolder ? '文件夹' : '文件' }}</span>
                 <span v-if="!row.isFolder">{{ formatSize(row.sizeBytes) }}</span>
@@ -88,6 +90,7 @@ import AppIcon from '../components/ui/AppIcon.vue'
 import ProgressiveList from '../components/ui/ProgressiveList.vue'
 import SelectionDock from '../components/ui/SelectionDock.vue'
 import RowActionMenu from '../components/RowActionMenu.vue'
+import ScrollName from '../components/ui/ScrollName.vue'
 import { confirmDialog } from '../components/ui/confirm'
 import { api, errorDetail, errorText, formatSize } from '../api'
 import { state } from '../store'

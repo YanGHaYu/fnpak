@@ -144,6 +144,37 @@
   .selection-dock-space {
     height: 6rem;
   }
+  /* 行名称区：桌面溢出隐藏（配合内部 truncate 省略号），移动端改为容器内横向滚动 */
+  .name-scroll {
+    min-width: 0;
+    overflow: hidden;
+  }
+  @media (max-width: 767px) {
+    .name-scroll {
+      overflow-x: auto;
+      overflow-y: hidden;
+      white-space: nowrap;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      overscroll-behavior-x: contain;
+      -webkit-overflow-scrolling: touch;
+    }
+    .name-scroll::-webkit-scrollbar {
+      display: none;
+    }
+    /* 内容按自身宽度展开，内部 truncate 在窄屏失效，从而产生可滚动宽度 */
+    .name-scroll > .name-scroll-content {
+      display: flex;
+      width: max-content;
+      max-width: none;
+      min-width: 0;
+      align-items: center;
+    }
+    .name-scroll > .name-scroll-content .truncate {
+      overflow: visible;
+      text-overflow: clip;
+    }
+  }
   @media (min-width: 768px) {
     .selection-dock {
       position: sticky;

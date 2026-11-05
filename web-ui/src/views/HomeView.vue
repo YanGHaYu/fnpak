@@ -101,20 +101,22 @@
                   @update:model-value="(value) => toggleDriveRow(row, value)"
                 />
 
-                <span class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted">
+                <span class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted max-md:col-start-2">
                   <AppIcon :name="row.isFolder ? 'folder' : (row.isVideo ? 'play' : 'file')" :size="18" />
                 </span>
 
-                <div class="min-w-0">
-                  <button
-                    type="button"
-                    class="flex w-full min-w-0 items-center gap-2 text-left"
-                    :title="row.name || row.id"
-                    @click="onRowClick(row)"
-                  >
-                    <span class="truncate text-sm font-medium" :class="{ 'font-mono': !row.isFolder }">{{ row.name || row.id }}</span>
-                    <span v-if="row.isFolder" class="shrink-0 rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] text-muted">目录</span>
-                  </button>
+                <div class="min-w-0 max-md:col-start-3">
+                  <ScrollName :label="row.name || row.id">
+                    <button
+                      type="button"
+                      class="flex min-w-0 items-center gap-2 text-left md:w-full"
+                      :title="row.name || row.id"
+                      @click="onRowClick(row)"
+                    >
+                      <span class="truncate text-sm font-medium" :class="{ 'font-mono': !row.isFolder }">{{ row.name || row.id }}</span>
+                      <span v-if="row.isFolder" class="shrink-0 rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] text-muted">目录</span>
+                    </button>
+                  </ScrollName>
                   <p class="mt-0.5 flex flex-wrap gap-x-3 text-xs text-muted md:hidden">
                     <span v-if="!row.isFolder">{{ formatSize(row.sizeBytes) || '—' }}</span>
                     <span>{{ row.isFolder ? '文件夹' : (row.mimeType || '—') }}</span>
@@ -128,12 +130,14 @@
                   {{ row.isFolder ? '' : row.mimeType || '' }}
                 </span>
 
-                <RowActionMenu
-                  trigger="hover"
-                  :label="row.name || row.id"
-                  :actions="driveActions(row)"
-                  @select="(key) => onDriveAction(row, key)"
-                />
+                <div class="max-md:col-start-4">
+                  <RowActionMenu
+                    trigger="hover"
+                    :label="row.name || row.id"
+                    :actions="driveActions(row)"
+                    @select="(key) => onDriveAction(row, key)"
+                  />
+                </div>
               </div>
             </template>
           </ProgressiveList>
@@ -245,18 +249,20 @@
 
                   <button
                     type="button"
-                    class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted"
+                    class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted max-md:col-start-2"
                     :aria-label="isExpanded(row) ? '收起子项' : '展开子项'"
                     @click="toggleExpand(row)"
                   >
                     <AppIcon :name="isExpanded(row) ? 'chevronDown' : 'chevronRight'" :size="16" />
                   </button>
 
-                  <div class="min-w-0">
-                    <button type="button" class="flex w-full min-w-0 items-center gap-2 text-left" @click="toggleExpand(row)">
-                      <span class="truncate text-sm font-medium" :title="row.name">{{ row.name }}</span>
-                      <span class="shrink-0 rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] text-muted">{{ kindText(row.kind) }}</span>
-                    </button>
+                  <div class="min-w-0 max-md:col-start-3">
+                    <ScrollName :label="row.name">
+                      <button type="button" class="flex min-w-0 items-center gap-2 text-left md:w-full" @click="toggleExpand(row)">
+                        <span class="truncate text-sm font-medium" :title="row.name">{{ row.name }}</span>
+                        <span class="shrink-0 rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] text-muted">{{ kindText(row.kind) }}</span>
+                      </button>
+                    </ScrollName>
                     <p class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted md:hidden">
                       <span class="rounded-full px-1.5 py-0.5" :class="statusChipClass(row.status)">{{ groupStatusText(row.status) }}</span>
                       <!-- 无速率时不渲染占位破折号，避免组元信息前出现多余分隔符 -->
@@ -275,12 +281,14 @@
                     <span class="rounded-full px-1.5 py-0.5 text-xs" :class="statusChipClass(row.status)">{{ groupStatusText(row.status) }}</span>
                   </span>
 
-                  <RowActionMenu
-                    trigger="hover"
-                    :label="row.name"
-                    :actions="groupActions(row)"
-                    @select="(key) => onGroupAction(row, key)"
-                  />
+                  <div class="max-md:col-start-4">
+                    <RowActionMenu
+                      trigger="hover"
+                      :label="row.name"
+                      :actions="groupActions(row)"
+                      @select="(key) => onGroupAction(row, key)"
+                    />
+                  </div>
                 </div>
 
                 <div v-if="row.status !== 'SCANNING'" class="px-2 md:hidden">
@@ -303,7 +311,9 @@
                               <AppIcon :name="child.status === 'COMPLETED' ? 'check' : 'file'" :size="14" />
                             </span>
                             <div class="min-w-0">
-                              <p class="truncate font-mono text-xs" :title="child.fileName">{{ child.fileName }}</p>
+                              <ScrollName :label="child.fileName">
+                                <p class="truncate font-mono text-xs" :title="child.fileName">{{ child.fileName }}</p>
+                              </ScrollName>
                               <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                                 <span class="rounded-full px-1.5 py-0.5 text-[10px]" :class="statusChipClass(child.status)">
                                   {{ childStatusText(child.status) }} · {{ Number(child.percent) || 0 }}%
@@ -388,14 +398,16 @@
                   @update:model-value="(value) => toggleOfflineRow(row, value)"
                 />
 
-                <span class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted">
+                <span class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted max-md:col-start-2">
                   <AppIcon :name="row.type === 'folder' ? 'folder' : 'link'" :size="18" />
                 </span>
 
-                <div class="min-w-0">
-                  <span class="block truncate text-sm font-medium" :title="`名称来源：${sourceText(row.nameSource)}`">
-                    {{ row.name || row.id }}
-                  </span>
+                <div class="min-w-0 max-md:col-start-3">
+                  <ScrollName :label="row.name || row.id">
+                    <span class="block truncate text-sm font-medium" :title="`名称来源：${sourceText(row.nameSource)}`">
+                      {{ row.name || row.id }}
+                    </span>
+                  </ScrollName>
                   <p class="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-muted md:hidden">
                     <span>{{ row.type === 'folder' ? `文件夹${row.folderChildCount ? ` · ${row.folderChildCount}${row.folderChildCountTruncated ? '+' : ''}` : ''}` : row.type === 'file' ? '文件' : '—' }}</span>
                     <span>{{ phaseText(row.phase) }}</span>
@@ -413,12 +425,14 @@
                 </div>
                 <span class="hidden text-right font-mono text-xs text-muted md:block">{{ formatSize(row.fileSize) || '—' }}</span>
 
-                <RowActionMenu
-                  trigger="hover"
-                  :label="row.name || row.id"
-                  :actions="offlineActions()"
-                  @select="() => deleteOffline([row])"
-                />
+                <div class="max-md:col-start-4">
+                  <RowActionMenu
+                    trigger="hover"
+                    :label="row.name || row.id"
+                    :actions="offlineActions()"
+                    @select="() => deleteOffline([row])"
+                  />
+                </div>
               </div>
               <div class="mb-2 -mt-1.5 px-2 md:hidden">
                 <AppProgress :value="Number(row.progress) || 0" :height="8" />
@@ -497,6 +511,7 @@ import { useRoute, useRouter } from 'vue-router'
 import DirTreePicker from '../components/DirTreePicker.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
 import RowActionMenu from '../components/RowActionMenu.vue'
+import ScrollName from '../components/ui/ScrollName.vue'
 import TrashView from './TrashView.vue'
 import AppAlert from '../components/ui/AppAlert.vue'
 import AppButton from '../components/ui/AppButton.vue'
