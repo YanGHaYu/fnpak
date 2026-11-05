@@ -17,6 +17,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Assert release target repository
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          # origin 是上游 fork（YanGHaYu/piko），正式发布仓库是 YanGHaYu/fnpak。
+          # 推 tag 必须推到 fnpak remote（git push fnpak <tag>），否则这里直接 fail。
+          test "${REPO}" = "YanGHaYu/fnpak" || {
+            echo "ERROR: 发布仓库必须是 YanGHaYu/fnpak，当前为 ${REPO}" >&2
+            echo "HINT: origin 是上游 fork；请用 git push fnpak main && git push fnpak <tag> 触发发布" >&2
+            exit 1
+          }
+
       - uses: actions/checkout@v4
 
       - name: Download fpk artifact
@@ -78,5 +90,6 @@ jobs:
           DISPLAY: ${{ steps.meta.outputs.display }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/*.fpk dist/sha256sum.txt \
+            --repo YanGHaYu/fnpak \
             --title "${DISPLAY} ${GITHUB_REF_NAME}" \
             --notes-file notes.md

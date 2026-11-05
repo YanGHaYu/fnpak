@@ -74,6 +74,38 @@ Gradle 会经 `foojay-resolver-convention` 自动下载，而该插件 0.9.0 在
 | 前端页面 404 / 旧资源 | `server/src/main/resources/web` 未同步 | `cd web-ui && npm run build` 后同步 `dist/index.html` 与 `dist/assets`；CI `build-web.yml` 会校验 |
 | `.jpackage.xml` 版本与 manifest 不一致 | 复用了旧的 app-image | 删除构建工作目录后重跑，确保 jpackage 每次重新生成 |
 
+## 发布与 remote（务必显式指定）
+
+本仓库有两个 remote，**默认的 `origin` 是上游 fork，不是发布仓库**：
+
+| remote | 仓库 | 用途 |
+|---|---|---|
+| `origin` | `YanGHaYu/piko` | 上游 fork（同步用），**不发布** |
+| `fnpak` | `YanGHaYu/fnpak` | 正式发布仓库（tag / Release / 资产都在这里） |
+
+因此所有发布动作都必须显式写 remote 或 `--repo`，不要依赖默认值：
+
+```bash
+git push fnpak main                  # 而不是 git push origin main
+git push fnpak v0.8.1                # 而不是 git push origin v0.8.1
+gh release view v0.8.1 -R YanGHaYu/fnpak
+gh release download v0.8.1 -R YanGHaYu/fnpak --dir release
+```
+
+`release.yml` 的 `publish` job 第一步是 `Assert release target repository`：`github.repository` 不是
+`YanGHaYu/fnpak` 就立即失败，`gh release create` 也显式带 `--repo YanGHaYu/fnpak`。写错 remote
+不会静默发到别处，而是直接报错。
+
+本地 `main` 的上游跟踪是 `fnpak/main`（`git branch -vv` 可见），但**跟踪分支不改变 `git push origin`
+的目标**：只要命令里写了 `origin`，就会推到上游。出问题时先跑：
+
+```bash
+git remote -v
+git branch -vv
+git ls-remote --tags fnpak | grep <tag>
+git ls-remote --tags origin | grep <tag>
+```
+
 ## 回滚思路
 
 - 构建失败不会改动仓库内已提交的 `server/src/main/resources/web`；前端回滚只需 `git checkout -- server/src/main/resources/web`
