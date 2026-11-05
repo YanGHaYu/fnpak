@@ -1,23 +1,22 @@
 {
   "name": "fnpak-web",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
-  "description": "FNPak 服务端页面（Vue 3 + Element Plus，构建后自包含，可离线运行）",
+  "description": "FNPak 服务端页面（Vue 3 + Vite + Tailwind CSS v4 + reka-ui，构建后自包含，可离线运行）",
   "scripts": {
     "dev": "vite",
     "build": "vite build"
   },
   "dependencies": {
-    "@element-plus/icons-vue": "^2.3.1",
-    "element-plus": "^2.9.1",
+    "reka-ui": "^2.11.0",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.4",
     "@vitejs/plugin-vue": "^5.2.1",
-    "unplugin-auto-import": "^0.19.0",
-    "unplugin-vue-components": "^0.28.0",
+    "tailwindcss": "^4.3.4",
     "vite": "^5.4.11"
   }
 }

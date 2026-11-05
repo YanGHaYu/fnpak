@@ -1,16 +1,11 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import AutoImport from 'unplugin-auto-import/vite'
-import Components from 'unplugin-vue-components/vite'
-import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+import tailwindcss from '@tailwindcss/vite'
 
 // 产物要能离线单机打开：不打 CDN、不做外部化，依赖全部进 bundle。
+// Tailwind 在构建期静态产出 CSS，运行时不需要任何网络资源。
 export default defineConfig({
-  plugins: [
-    vue(),
-    AutoImport({ resolvers: [ElementPlusResolver({ importStyle: 'css' })], dts: false }),
-    Components({ resolvers: [ElementPlusResolver({ importStyle: 'css' })], dts: false }),
-  ],
+  plugins: [vue(), tailwindcss()],
   build: {
     outDir: 'dist',
     assetsDir: 'assets',

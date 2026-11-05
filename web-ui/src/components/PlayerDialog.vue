@@ -1,25 +1,26 @@
 <template>
-  <el-dialog
-    v-model="visible"
-    class="player-dialog"
+  <AppDialog
+    :open="visible"
     :title="item?.name || '播放'"
-    width="min(980px, 94vw)"
-    destroy-on-close
-    @closed="teardown"
+    mobile-full
+    @update:open="(value) => visible = value"
   >
-    <div class="toolbar" style="margin-bottom: 8px">
-      <el-tag size="small" :type="modeType">{{ modeText }}</el-tag>
-      <el-tag size="small" effect="plain">{{ metaText }}</el-tag>
-      <div class="spacer" />
-      <el-button size="small" @click="forceProxy">强制转发</el-button>
+    <div class="mb-2 flex flex-wrap items-center gap-2">
+      <span class="rounded-full border border-line px-2 py-0.5 text-xs" :class="mode.value ? 'border-success/40 text-success' : 'text-muted'">
+        {{ modeText }}
+      </span>
+      <span class="rounded-full border border-line px-2 py-0.5 text-xs text-muted">{{ metaText }}</span>
+      <AppButton size="sm" variant="secondary" @click="forceProxy">强制转发</AppButton>
     </div>
-    <video ref="videoRef" class="video-box" controls playsinline />
-    <p class="hint mono" style="white-space: pre-wrap; margin-top: 8px">{{ diag }}</p>
-  </el-dialog>
+    <video ref="videoRef" class="max-h-[70vh] w-full rounded-md bg-black max-md:max-h-[75vh]" controls playsinline />
+    <p class="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-muted">{{ diag }}</p>
+  </AppDialog>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
+import AppButton from './ui/AppButton.vue'
+import AppDialog from './ui/AppDialog.vue'
 import { api, errorText, formatSize } from '../api'
 
 const props = defineProps({
@@ -44,7 +45,6 @@ const modeText = computed(() => {
   if (!mode.value) return '查询模式…'
   return mode.value === 'redirect' ? '直链模式（302）' : '转发模式（服务端代理）'
 })
-const modeType = computed(() => (mode.value ? 'success' : 'info'))
 const metaText = computed(
   () => `${formatSize(sizeBytes.value || props.item?.sizeBytes)} · ${mimeType.value || props.item?.mimeType || '未知类型'}`,
 )
