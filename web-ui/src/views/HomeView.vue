@@ -142,10 +142,17 @@
 
         <SelectionDock v-if="driveSelection.length">
           <template #info>
-            已选 <b>{{ driveSelection.length }}</b> 项，其中
-            <b>{{ folderSelectionCount }}</b> 个文件夹、<b>{{ fileSelectionCount }}</b> 个文件
-            <span class="text-muted">
-              （文件 {{ formatSize(selectedBytes) || '0 B' }}<template v-if="folderSelectionCount">；文件夹大小待扫描</template>）
+            <!-- 窄屏只留一行（计数 + 类型），体积与「待扫描」说明在桌面展开 -->
+            <span class="md:hidden">
+              已选 <b>{{ driveSelection.length }}</b> 项
+              <span class="text-muted">· {{ folderSelectionCount }} 文件夹 / {{ fileSelectionCount }} 文件</span>
+            </span>
+            <span class="hidden md:inline">
+              已选 <b>{{ driveSelection.length }}</b> 项，其中
+              <b>{{ folderSelectionCount }}</b> 个文件夹、<b>{{ fileSelectionCount }}</b> 个文件
+              <span class="text-muted">
+                （文件 {{ formatSize(selectedBytes) || '0 B' }}<template v-if="folderSelectionCount">；文件夹大小待扫描</template>）
+              </span>
             </span>
           </template>
           <template #actions>
@@ -252,7 +259,8 @@
                     </button>
                     <p class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted md:hidden">
                       <span class="rounded-full px-1.5 py-0.5" :class="statusChipClass(row.status)">{{ groupStatusText(row.status) }}</span>
-                      <span class="font-mono">{{ formatSpeed(row.speedBytesPerSec) }}</span>
+                      <!-- 无速率时不渲染占位破折号，避免组元信息前出现多余分隔符 -->
+                      <span v-if="Number(row.speedBytesPerSec) > 0" class="font-mono">{{ formatSpeed(row.speedBytesPerSec) }}</span>
                       <span class="font-mono">{{ groupMetaText(row) }}</span>
                     </p>
                   </div>

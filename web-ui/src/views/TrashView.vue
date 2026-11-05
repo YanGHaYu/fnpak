@@ -70,12 +70,8 @@
         已选 <b>{{ selection.length }}</b> 项
       </template>
       <template #actions>
-        <AppButton size="sm" variant="primary" :loading="busy" @click="restoreRows(selection)">
-          恢复（{{ selection.length }} 项）
-        </AppButton>
-        <AppButton size="sm" variant="danger-soft" :loading="busy" @click="deleteForever(selection)">
-          彻底删除（{{ selection.length }} 项）
-        </AppButton>
+        <AppButton size="sm" variant="primary" :loading="busy" @click="restoreRows(selection)">恢复</AppButton>
+        <AppButton size="sm" variant="danger-soft" :loading="busy" @click="deleteForever(selection)">彻底删除</AppButton>
         <AppButton size="sm" variant="ghost" @click="clearSelection">取消选择</AppButton>
       </template>
     </SelectionDock>
