@@ -31,12 +31,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build server distribution
-        # 不再写机器级 ~/.gradle/gradle.properties：用 fpkOnly 只评估 :shared/:server（不需要 JDK 25），
-        # 并关闭 toolchain 自动下载，缺 JDK 21 时直接失败而不是走 foojay 解析
+        # 不写机器级 ~/.gradle/gradle.properties：默认构建即 fpk-only（只评估 :shared/:server，
+        # 不需要 JDK 25），并关闭 toolchain 自动下载，缺 JDK 21 时直接失败而不是走 foojay 解析
         run: |
           chmod +x gradlew scripts/*.sh build-nodev.sh
           ./gradlew :server:installDist --configure-on-demand --no-daemon --stacktrace \
-            -Pfnpak.fpkOnly=true \
             -Porg.gradle.java.installations.auto-download=false
 
       - name: Read app metadata from manifest

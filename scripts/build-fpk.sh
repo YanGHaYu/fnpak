@@ -9,8 +9,9 @@
 #
 # 本脚本默认先跑 :server:installDist，再打包；CI 若已单独跑过 installDist，
 # 可用 SKIP_INSTALL_DIST=1 跳过。installDist 固定带：
-#   -Pfnpak.fpkOnly=true                       只包含 :shared/:server，不评估 :desktopApp（它要 JDK 25）
 #   -Porg.gradle.java.installations.auto-download=false  工具链缺失立即报错，不走 foojay 联网解析
+# 模块裁剪已改为 Gradle 默认行为（默认只 include :shared/:server，不评估要 JDK 25 的 :desktopApp），
+# 脚本不再显式传 -Pfnpak.fpkOnly=true；需要完整模块时手动加 -Pfnpak.full=true。
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -65,14 +66,13 @@ DISPLAY=$(read_field display_name)
 DIST_DIR="$ROOT/server/build/install/${APPNAME}-server"
 if [ "${SKIP_INSTALL_DIST:-0}" != "1" ]; then
   echo "== installDist (JDK 21) =="
-  # fpkOnly 让 settings.gradle.kts 不 include :desktopApp；关掉自动下载后缺 JDK 21 会直接报错，
+  # settings.gradle.kts 默认不 include :desktopApp；关掉自动下载后缺 JDK 21 会直接报错，
   # 不会去 foojay 联网解析（Gradle 9.6 + foojay 0.9 在这条路径上会抛 IBM_SEMERU）
   (cd "$ROOT" && ./gradlew :server:installDist $GRADLE_ARGS \
-    -Pfnpak.fpkOnly=true \
     -Porg.gradle.java.installations.auto-download=false) \
     || fail "installDist 失败：确认 JAVA_HOME 或 java 指向 JDK 21（:shared/:server 用 jvmToolchain(21)），且未依赖工具链自动下载"
 fi
-[ -d "$DIST_DIR/lib" ] || fail "缺少 $DIST_DIR，请先跑 ./gradlew :server:installDist -Pfnpak.fpkOnly=true"
+[ -d "$DIST_DIR/lib" ] || fail "缺少 $DIST_DIR，请先跑 ./gradlew :server:installDist"
 [ -f "$DIST_DIR/lib/server.jar" ] || fail "installDist 里找不到 server.jar"
 
 rm -rf "$WORK"

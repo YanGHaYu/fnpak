@@ -35,28 +35,31 @@ JDK="$HOME/opt/jdk-21" FNPACK="$HOME/opt/fnpack" ./scripts/build-fpk.sh
 ./scripts/check-fpk.sh build/fpk/stage
 ```
 
-### 只构建服务端 / fpk：`-Pfnpak.fpkOnly=true`
+### 默认构建 = 服务端 / fpk（只需 JDK 21）
 
-服务端与 fpk 链路只需要 JDK 21。但完整工程里的 `:desktopApp` 在**配置阶段**就会解析 JDK 25 工具链
+服务端与 fpk 链路只需要 JDK 21。完整工程里的 `:desktopApp` 在**配置阶段**就会解析 JDK 25 工具链
 （Windows 原生能力依赖 JDK 22+ 的 FFM，见 `desktopApp/build.gradle.kts`）；机器上没有 JDK 25 时，
 Gradle 会经 `foojay-resolver-convention` 自动下载，而该插件 0.9.0 在 Gradle 9.6 上会抛
 `Class org.gradle.jvm.toolchain.JvmVendorSpec does not have member field ... IBM_SEMERU`，
 看起来与 fpk 无关，实际是 `:desktopApp` 的配置副作用。
 
-因此 `settings.gradle.kts` 支持按属性裁剪模块：
+因此 `settings.gradle.kts` 的**默认行为**只 include `:shared` 与 `:server`：
 
 ```bash
-./gradlew :server:installDist -Pfnpak.fpkOnly=true \
-  -Porg.gradle.java.installations.auto-download=false
+# 不带任何 -P 属性即可，只需要 JDK 21，不会评估桌面模块
+./gradlew :server:installDist --configure-on-demand --no-daemon
 ```
 
-- `-Pfnpak.fpkOnly=true`：只 include `:shared` 与 `:server`，不评估 `:app` / `:ui` / `:desktopApp` / `:cli` / `:shots`。
+- 默认：只 include `:shared` 与 `:server`，不评估 `:app` / `:ui` / `:desktopApp` / `:cli` / `:shots`，
+  根任务 `run` 也不注册。`./gradlew projects` 只会列出这两个模块。
+- `-Pfnpak.full=true`：include 全部模块（含桌面/CLI/截图），**需要 JDK 25**，根 `run` 同时可用。
+  这是桌面开发与桌面打包的预期前提，不是故障。
+- 兼容旧属性 `-Pfnpak.fpkOnly`：显式传 `false` 等价于 `-Pfnpak.full=true`；两者冲突时 `full=true` 优先。
 - `-Porg.gradle.java.installations.auto-download=false`：工具链缺失时立即报错，不联网解析。
-- **不传 `fnpak.fpkOnly` 时行为与以前完全一致**：仍是完整模块集合，`./gradlew :desktopApp:...`、根 `run` 照常可用。
-- `scripts/build-fpk.sh` 与 `build-nodev.sh` 已固定带上这两个参数，CI 也按同样参数构建，不再写
+  `scripts/build-fpk.sh` 固定带上它，CI 也按同样参数构建，不再写
   `~/.gradle/gradle.properties` 的 `org.gradle.java.installations.paths`。
 
-注意：`fpkOnly` 构建不包含桌面模块，根任务 `run` 也被跳过；需要在完整工程里做桌面开发时不要带该属性。
+注意：桌面模块源码仍在原位，只是默认不参与配置；需要桌面开发时显式加 `-Pfnpak.full=true`。
 
 ## 常见问题
 
@@ -64,9 +67,9 @@ Gradle 会经 `foojay-resolver-convention` 自动下载，而该插件 0.9.0 在
 |---|---|---|
 | `Permission denied: ./gradlew` | Windows 检出丢失执行位或 CRLF | `chmod +x gradlew`；确认 `.gitattributes` 已含 `gradlew text eol=lf` |
 | `fnpack` 产物里脚本不可执行 | 在 Windows 侧打包 | 改在 Linux/WSL 打包；脚本会 `chmod 0755` |
-| `JvmVendorSpec ... IBM_SEMERU` | `:desktopApp` 配置期要 JDK 25，缺它时 foojay 0.9 在 Gradle 9.6 上异常 | 加 `-Pfnpak.fpkOnly=true`（脚本已内置），只用 JDK 21 构建 |
+| `JvmVendorSpec ... IBM_SEMERU` | 传了 `-Pfnpak.full=true` 且机器没有 JDK 25，`:desktopApp` 配置期走 foojay 0.9 的异常路径 | 只构建 server/fpk 时不要带 `full=true`（默认即是）；需要桌面模块就装 JDK 25 |
 | `No matching toolchains found ... languageVersion=21` | `auto-download=false` 且机器没有 JDK 21 | 安装 JDK 21 并设 `JAVA_HOME`/`JDK`；不要靠自动下载 |
-| `configure-on-demand` 仍配置 `:desktopApp` | 未带 `fnpak.fpkOnly` | 确认脚本/命令带上了该属性 |
+| `configure-on-demand` 仍配置 `:desktopApp` | 显式传了 `-Pfnpak.full=true` 或 `-Pfnpak.fpkOnly=false` | 去掉该属性即回到默认 fpk-only |
 | 前端页面 404 / 旧资源 | `server/src/main/resources/web` 未同步 | `cd web-ui && npm run build` 后同步 `dist/index.html` 与 `dist/assets`；CI `build-web.yml` 会校验 |
 | `.jpackage.xml` 版本与 manifest 不一致 | 复用了旧的 app-image | 删除构建工作目录后重跑，确保 jpackage 每次重新生成 |
 

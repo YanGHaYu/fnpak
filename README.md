@@ -57,6 +57,10 @@ FNPACK=/path/to/fnpack ./scripts/build-fpk.sh
 ```
 
 > 必须在 Linux（或 WSL Ubuntu）上执行 fnpack，Windows 侧打包会丢失 0755 执行位。
+>
+> **默认构建只包含 `:shared` 与 `:server`，只需 JDK 21**，不带任何 `-P` 属性即可；
+> 桌面开发/桌面打包需要完整模块（`:desktopApp` 等），此时显式加 `-Pfnpak.full=true` 并安装 JDK 25，
+> 这是预期行为而非故障。兼容旧属性 `-Pfnpak.fpkOnly`（显式 `false` 等价于 `full=true`，冲突时 `full=true` 优先）。
 
 ### GitHub Actions
 
