@@ -1,5 +1,5 @@
 appname=fnpak
-version=0.7.0
+version=0.7.1
 display_name=FNPak
 desc=PikPak 第三方 NAS 客户端 · 非官方：Web UI 浏览云盘、磁力/分享入库、离线任务与下载。
 source=thirdparty
@@ -21,7 +21,8 @@ desktop_applaunchname=fnpak.main
 
 disable_authorization_path=false
 
-changelog=0.7.0: 更名为 FNPak（PikPak 第三方 NAS 客户端 · 非官方）：appname 由 piko 改为 fnpak，安装目录变为 /var/apps/fnpak，可执行/构件名改为 fnpak-server，桌面入口 key 改为 fnpak.main；内部 Kotlin 包名 dev.piko.* 沿用上游以降低同步冲突；服务端日志前缀、Cookie、媒体头与前端标题同步更名；旧用户迁移见 README（复制 var 下的 access-token/settings.json/download-tasks.json，或重新设置口令与下载位置）。
+changelog=0.7.1: 只重试失败项：新增单条与批量重试接口（POST /api/downloads/{id}/retry、POST /api/downloads/groups/{id}/retry），只挑失败/中断的子项，已完成与下载中/排队中的不动；重试复用 completedRanges 只补未完成区间，并重新获取直链（不复用过期签名）；运行或排队中重试返回 409 可读提示，不产生重复任务；失败原因可读化（HTTP 状态、直链失效、云端 404、磁盘空间不足、下载目录不可写）；子项行内菜单新增「重试」（仅失败态）与批量条「重试失败项 (N)」，SSE 进度事件新增 error 字段。
+0.7.0: 更名为 FNPak（PikPak 第三方 NAS 客户端 · 非官方）：appname 由 piko 改为 fnpak，安装目录变为 /var/apps/fnpak，可执行/构件名改为 fnpak-server，桌面入口 key 改为 fnpak.main；内部 Kotlin 包名 dev.piko.* 沿用上游以降低同步冲突；服务端日志前缀、Cookie、媒体头与前端标题同步更名；旧用户迁移见 README（复制 var 下的 access-token/settings.json/download-tasks.json，或重新设置口令与下载位置）。
 0.6.2: 退出登录从目录页头移到设置页账号区块（文案「退出登录」，说明会清除本机登录态、云端文件不受影响）；回收站改为首页第四个平行 Tab（目录 / 本机下载 / 离线任务 / 回收站），/trash 深链仍可直接打开且刷新后停在回收站，Tab 可显示回收站条数（拿不到总数时不显示）；修复批量下载展开子项看不全：SSE 下载进度事件补齐 fileId/parentTaskId/groupId，前端改为按 id 合并而非整对象替换，子项始终以 GET /api/downloads 全量为准，并加展开时兜底刷新；子项列表显示「共 N 项，显示 M 项」，桌面与移动端均在滚动区内可完整浏览数百项，每条带状态徽标与百分比。
 0.6.1: 版式修正：行内「⋯」改为表格独立最后一列（移动端卡片固定在右上角，不占名称行），三个 Tab 与回收站统一；多选操作条去掉重命名（多选不提供重命名），移动端常见操作常驻一行、移动到/复制到收进「更多」；选中数量与大小文案独占一行，按钮另起一行，移动端按钮仍为 44px 高且不折行、不溢出视口。
 0.6.0: 新增回收站页面（/trash）：列出名称/类型/原位置/大小/删除时间，支持恢复与彻底删除（彻底删除为 SDK batchDelete，永久不可恢复，执行前二次确认并写出目标名）；全站行内操作收敛为单个「⋯」图标：桌面悬浮弹出带图标+文案的菜单，移动端点击弹出、44px 触控目标；行内操作永远只作用于当前行，批量操作只留在底部操作条；删除类确认框均写出目标名称。

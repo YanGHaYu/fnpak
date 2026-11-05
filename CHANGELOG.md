@@ -2,6 +2,15 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.7.1 — 只重试失败项（断点续传）
+
+- 新增 `POST /api/downloads/{id}/retry` 与 `POST /api/downloads/groups/{id}/retry`：只挑失败/中断的子项重试，已完成、下载中、排队中的一律不动
+- 重试保留 `completedRanges` 与已下字节，只补未完成区间；开始时重新获取直链（不复用过期签名）
+- 防重复：运行或排队中的文件重试返回 409 与可读提示（如「该文件正在下载中，请等它结束或先暂停」）
+- 失败原因可读化：HTTP 状态、直链失效、云端 404、磁盘空间不足、下载目录不可写，原始异常只进日志；SSE `download.progress` 新增 `error` 字段
+- UI：子项行内 `⋯` 菜单新增「重试」（仅失败状态显示）；批量操作条新增「重试失败项 (N)」；失败原因直接显示在子项行
+- 版本 `0.7.1`（manifest / `ServerConfig` / `/api/health` 与构建产出的 `.jpackage.xml`、`fnpak-server.cfg` 一致）
+
 ## 0.7.0 — 更名 FNPak（破坏性）
 
 - 产品名改为 **FNPak**：`appname=fnpak`、`display_name=FNPak`、桌面入口 `fnpak.main`
