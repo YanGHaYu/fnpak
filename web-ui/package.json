@@ -1,7 +1,7 @@
 {
   "name": "fnpak-web",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "description": "FNPak 服务端页面（Vue 3 + Vite + Tailwind CSS v4 + reka-ui，构建后自包含，可离线运行）",
   "scripts": {

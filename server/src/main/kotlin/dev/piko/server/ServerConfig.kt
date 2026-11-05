@@ -55,7 +55,7 @@ data class ServerConfig(
         const val DEFAULT_PORT = 18080
         const val DEFAULT_HOST = "127.0.0.1"
         const val APP_NAME = "FNPak"
-        const val VERSION = "0.8.0"
+        const val VERSION = "0.8.1"
 
         fun from(args: Array<String>): ServerConfig {
             var host = DEFAULT_HOST
