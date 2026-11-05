@@ -1,5 +1,8 @@
 # FNPak
 
+[![build-server](https://github.com/YanGHaYu/fnpak/actions/workflows/build-server.yml/badge.svg?branch=main)](https://github.com/YanGHaYu/fnpak/actions/workflows/build-server.yml)
+[![build-web](https://github.com/YanGHaYu/fnpak/actions/workflows/build-web.yml/badge.svg?branch=main)](https://github.com/YanGHaYu/fnpak/actions/workflows/build-web.yml)
+
 **PikPak 第三方 NAS 客户端 · 非官方**
 
 > **非官方声明**：FNPak 是非官方社区项目，与 NihilDigit/Piko、PikPak、飞牛 fnOS 官方均无关联，也未获得其背书或授权。本项目不包含 PikPak 或飞牛的商标素材。
