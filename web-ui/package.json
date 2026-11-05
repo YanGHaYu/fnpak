@@ -1,9 +1,9 @@
 {
-  "name": "piko-web",
+  "name": "fnpak-web",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.7.0",
   "type": "module",
-  "description": "Piko 服务端页面（Vue 3 + Element Plus，构建后自包含，可离线运行）",
+  "description": "FNPak 服务端页面（Vue 3 + Element Plus，构建后自包含，可离线运行）",
   "scripts": {
     "dev": "vite",
     "build": "vite build"

@@ -1,9 +1,9 @@
 <template>
   <div class="app">
     <header class="topbar">
-      <div class="brand">Piko <span class="ver">{{ state.version || '' }}</span></div>
+      <div class="brand">FNPak <span class="ver">{{ state.version || '' }}</span></div>
       <div class="spacer" />
-      <el-tag size="small" effect="plain" :type="healthType">{{ healthText }}</el-tag>
+      <el-tag size="small" effect="plain" :type="healthType" class="health-chip">{{ healthText }}</el-tag>
       <el-button text size="small" @click="toggleTheme">{{ dark ? '浅色' : '深色' }}</el-button>
       <el-button
         v-if="state.accessOk"
@@ -44,7 +44,7 @@ const healthType = computed(() => (state.health ? 'success' : 'warning'))
 function applyTheme(value) {
   dark.value = value
   document.documentElement.classList.toggle('dark', value)
-  localStorage.setItem('piko-theme', value ? 'dark' : 'light')
+  localStorage.setItem('fnpak-theme', value ? 'dark' : 'light')
 }
 
 function toggleTheme() {
@@ -52,7 +52,8 @@ function toggleTheme() {
 }
 
 onMounted(async () => {
-  const saved = localStorage.getItem('piko-theme')
+  // 兼容 0.6.x：优先新键，读不到时回退旧键，避免升级后主题被重置
+  const saved = localStorage.getItem('fnpak-theme') ?? localStorage.getItem('piko-theme')
   applyTheme(saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches)
   await refreshHealth()
   await refreshSetup()

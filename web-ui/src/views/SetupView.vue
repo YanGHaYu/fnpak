@@ -3,7 +3,7 @@
     <template #header>
       <div class="card-head">
         <span class="title">首次设置访问口令</span>
-        <span class="muted" style="font-size: 12px">Piko 还没有访问口令，设置后才能进入</span>
+        <span class="muted" style="font-size: 12px">FNPak 还没有访问口令，设置后才能进入</span>
       </div>
     </template>
     <el-alert

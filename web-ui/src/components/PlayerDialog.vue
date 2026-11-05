@@ -62,7 +62,7 @@ async function probeStream(id) {
         `预检：HTTP ${response.status}${response.redirected ? '（已跟随 302 到直链）' : ''}` +
         ` · content-type=${response.headers.get('content-type') || '—'}` +
         ` · content-range=${response.headers.get('content-range') || '—'}` +
-        ` · mode=${response.headers.get('x-piko-media-mode') || '—'}`,
+        ` · mode=${response.headers.get('x-fnpak-media-mode') || '—'}`,
     }
   } catch (error) {
     return { status: 0, text: `预检失败：${error.name}: ${error.message}` }

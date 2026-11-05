@@ -18,7 +18,7 @@ private const val TAG = "Access"
  * 最小够用的访问控制：一道口令 + 一枚短期会话 Cookie。
  *
  * 单一可信来源：口令只存在两个地方——数据目录里的 `access-token` 文件（0600）与本实例的内存副本。
- * 启动时优先级是 `--access-token` / `PIKO_SERVER_TOKEN`（外部托管，只读不写）> 文件 > 无口令状态。
+ * 启动时优先级是 `--access-token` / `FNPAK_SERVER_TOKEN`（兼容旧名 `PIKO_SERVER_TOKEN`；外部托管，只读不写）> 文件 > 无口令状态。
  * **首次运行不再自动生成口令**：没有文件时进入「设置向导」，由用户在页面里设置后原子写盘。
  * 页面改口令时原子写回同一个文件并同步内存，重启后依然是新值。
  *
@@ -144,7 +144,7 @@ class AccessControl(
         MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
 
     companion object {
-        const val COOKIE_NAME = "piko_session"
+        const val COOKIE_NAME = "fnpak_session"
         const val SESSION_TTL_SECONDS = 8 * 60 * 60
         const val MIN_PASSCODE_LENGTH = 12
         private const val TOKEN_BYTES = 32

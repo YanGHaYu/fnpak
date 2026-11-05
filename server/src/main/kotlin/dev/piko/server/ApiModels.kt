@@ -11,6 +11,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class HealthResponse(
     val ok: Boolean,
+    val app: String,
     val version: String,
     val home: String,
     val authenticated: Boolean,
@@ -26,7 +27,7 @@ data class HealthResponse(
 @Serializable
 data class AccessTokenSettings(
     val fingerprint: String,
-    /** true 表示口令来自 --access-token / PIKO_SERVER_TOKEN，页面不可改。 */
+    /** true 表示口令来自 --access-token / FNPAK_SERVER_TOKEN（兼容旧名 PIKO_SERVER_TOKEN），页面不可改。 */
     val managedExternally: Boolean,
     val source: String,
     val filePath: String,
@@ -437,6 +438,51 @@ data class CloudDeleteResponse(
     val note: String = "已移入回收站，可在回收站恢复；不是永久删除",
 )
 
+// ---- 回收站 ----
+
+/**
+ * 回收站条目。`parentName` 由服务端按 parentId 另查（查不到就为 null，前端显示「原位置不可用」）；
+ * `deleteTime` 保留服务端原值，可能是 ISO 8601 也可能是毫秒字符串，交给前端格式化。
+ */
+@Serializable
+data class TrashItem(
+    val id: String,
+    val name: String,
+    val kind: String,
+    val isFolder: Boolean,
+    val sizeBytes: Long = 0,
+    val parentId: String = "",
+    val parentName: String? = null,
+    val deleteTime: String? = null,
+)
+
+@Serializable
+data class TrashListResponse(
+    val items: List<TrashItem> = emptyList(),
+    val nextPageToken: String = "",
+    val pageSize: Int = 0,
+)
+
+@Serializable
+data class TrashActionRequest(val ids: List<String> = emptyList())
+
+/** 逐项结果：失败项前端保留在列表并显示原因，不整批回滚。 */
+@Serializable
+data class TrashActionResult(
+    val id: String,
+    val ok: Boolean,
+    val message: String? = null,
+)
+
+@Serializable
+data class TrashActionResponse(
+    val action: String,
+    val items: List<TrashActionResult> = emptyList(),
+    val succeeded: Int = 0,
+    val failed: Int = 0,
+    val note: String = "",
+)
+
 // ---- 重命名 / 移动 / 复制 ----
 
 /** 重命名请求。名称在服务端 trim 后校验：非空、≤255、不能含 `/` 与 `\`。 */
@@ -496,6 +542,14 @@ data class DownloadProgressEvent(
     val percent: Double,
     val speedBytesPerSec: Long,
     val status: String,
+    /**
+     * 归属信息：与 `GET /api/downloads` 的 DownloadItem 保持一致。
+     * 没有这几个字段时，前端只能把事件当成一条孤立进度，无法按 groupId 归到父任务下，
+     * 进行中的批次就会「只显示部分子项，暂停后刷新才全」。
+     */
+    val fileId: String = "",
+    val parentTaskId: String = "",
+    val groupId: String = "",
     /** 分段下载时各段的进度；其他下载方式没有这个字段（保持原字段不变，只做新增）。 */
     val segments: List<dev.piko.download.DownloadSegmentInfo>? = null,
 )

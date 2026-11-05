@@ -3,7 +3,7 @@
     <template #header>
       <div class="card-head">
         <span class="title">访问口令</span>
-        <span class="muted" style="font-size: 12px">Piko 只允许持有口令的人打开</span>
+        <span class="muted" style="font-size: 12px">FNPak 只允许持有口令的人打开</span>
       </div>
     </template>
     <el-form label-position="top" @submit.prevent="submit">

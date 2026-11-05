@@ -111,7 +111,7 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 HttpStatusCode.Conflict,
                 "token_managed_externally",
                 "口令由启动参数或环境变量管理（${access.tokenFilePath} 不会被读取），页面不可改；" +
-                    "请去掉 --access-token / PIKO_SERVER_TOKEN 后重启，再在页面里设置",
+                    "请去掉 --access-token / FNPAK_SERVER_TOKEN 后重启，再在页面里设置",
             )
             return@post
         }
@@ -211,7 +211,7 @@ private fun describeShare(entry: ShareEntry): ShareInfo {
 
 /** 就地在共享根下建一个随机小文件再删掉，判断真实可写（比 Files.isWritable 可靠）。 */
 private fun probeWrite(directory: Path): String? {
-    val name = ".piko-write-test-${SecureRandom().nextInt(1_000_000)}"
+    val name = ".fnpak-write-test-${SecureRandom().nextInt(1_000_000)}"
     val probe = directory.resolve(name)
     return try {
         Files.writeString(probe, "ok")

@@ -12,7 +12,7 @@ kotlin {
 }
 
 application {
-    applicationName = "piko-server"
+    applicationName = "fnpak-server"
     mainClass = "dev.piko.server.MainKt"
     // 无 X11 的 NAS 上不能有任何 AWT 窗口；headless 顺带让随手调用的桌面 API 直接报错而不是挂起
     applicationDefaultJvmArgs = listOf("-Djava.awt.headless=true", "-Dfile.encoding=UTF-8")

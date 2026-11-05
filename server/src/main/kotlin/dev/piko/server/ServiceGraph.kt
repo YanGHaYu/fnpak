@@ -50,7 +50,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     private val startedAtMillis = System.currentTimeMillis()
 
     /** 与进程同寿的协程域：登录恢复、重连、下载与各仓库的后台任务都挂在它下面。 */
-    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("piko-server"))
+    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("fnpak-server"))
 
     val sessionStore: DesktopSessionStore = DesktopSessionStore(config.home)
 
@@ -157,7 +157,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
      */
     fun applyDownloadDir(path: java.nio.file.Path) {
         config.updateDownloadDir(path)
-        PikoLog.i("Server", "下载目录切换为 $path（进行中的任务继续用原目录）")
+        PikoLog.i("FNPak", "下载目录切换为 $path（进行中的任务继续用原目录）")
         runCatching { runBlocking { preferences.setDownloadDirPath(path.toString()) } }
     }
 
@@ -168,7 +168,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     val uptimeSeconds: Long get() = (System.currentTimeMillis() - startedAtMillis) / 1000
 
     override fun close() {
-        PikoLog.i("Server", "服务端退出，暂停下载并保存任务表")
+        PikoLog.i("FNPak", "服务端退出，暂停下载并保存任务表")
         // 先暂停再落盘：进程被停掉时任务表里留着「下载中」，重启后会当成仍在跑却没有协程
         downloadCoordinator.pauseAll()
         runBlocking { withTimeoutOrNull(3_000) { runCatching { downloadCoordinator.flushPersistence() } } }

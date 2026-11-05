@@ -28,13 +28,13 @@ import java.nio.file.Files
 import kotlin.system.exitProcess
 import kotlinx.serialization.json.Json
 
-private const val TAG = "Server"
+private const val TAG = "FNPak"
 
 /**
  * 入口：解析参数 → 固定数据目录 → 装日志 → 口令就位 → 起 Ktor(CIO)。
  *
- * `-Dpiko.home` 必须在任何 `PikoHome` / 会话存储被访问之前设好：`DesktopSessionStore` 的根目录
- * 与日志目录都由它决定，晚了就会在 `~/.piko` 下建出第二份登录态。
+ * `-Dfnpak.home` 必须在任何 `PikoHome` / 会话存储被访问之前设好：`DesktopSessionStore` 的根目录
+ * 与日志目录都由它决定，晚了就会在 `~/.fnpak` 下建出第二份登录态。
  *
  * 口令校验在本进程内完成：没给口令时进入「首次设置向导」（无口令状态），由用户在页面设置后落盘；
  * 已有 token 文件或外部注入则直接启用，老用户不受影响。
@@ -47,7 +47,7 @@ fun main(args: Array<String>) {
         System.err.println("[E] $TAG: ${error.message}")
         exitProcess(2)
     }
-    System.setProperty("piko.home", config.home.toString())
+    System.setProperty("fnpak.home", config.home.toString())
     Files.createDirectories(config.home)
     val logDirectory = config.home.resolve("logs")
     Files.createDirectories(logDirectory)
@@ -87,7 +87,7 @@ fun main(args: Array<String>) {
     Runtime.getRuntime().addShutdownHook(Thread { runCatching { graph.close() } })
 
     println(
-        "Piko server listening on http://${config.host}:${config.port}" +
+        "${ServerConfig.APP_NAME} server listening on http://${config.host}:${config.port}" +
             " (home=${config.home}, download=${config.activeDownloadDir})",
     )
     embeddedServer(CIO, port = config.port, host = config.host) {
@@ -107,6 +107,7 @@ fun Application.installServer(graph: ServiceGraph, setup: AccessSetup) {
             call.respond(
                 HealthResponse(
                     ok = true,
+                    app = ServerConfig.APP_NAME,
                     version = ServerConfig.VERSION,
                     home = graph.config.home.toString(),
                     authenticated = graph.isAuthenticated,

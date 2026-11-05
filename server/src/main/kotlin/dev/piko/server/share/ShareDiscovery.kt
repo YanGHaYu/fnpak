@@ -41,7 +41,7 @@ data class ShareSnapshot(
  * 「新增授权要重启应用」。容器/桌面环境没有 socket 时会自然走退回分支，不影响功能。
  */
 object ShareDiscovery {
-    const val APP_NAME = "piko"
+    const val APP_NAME = "fnpak"
     private const val SOCKET_PATH = "/var/run/trim_open_gateway_apiscope.socket"
     private const val TIMEOUT_MS = 1500L
 
@@ -93,7 +93,7 @@ object ShareDiscovery {
         val channel = SocketChannel.open(UnixDomainSocketAddress.of(SOCKET_PATH))
         val finished = AtomicBoolean(false)
         // 看门狗：socket 那边不响应时主动关通道，避免设置页被拖死（1.5s 足够本机 IPC）
-        thread(isDaemon = true, name = "piko-share-watchdog") {
+        thread(isDaemon = true, name = "fnpak-share-watchdog") {
             runCatching {
                 Thread.sleep(TIMEOUT_MS)
                 if (finished.compareAndSet(false, true)) channel.close()

@@ -4,7 +4,7 @@
       <template #header>
         <div class="card-head">
           <span class="title">服务</span>
-          <el-tag v-if="settings" size="small" effect="plain">版本 {{ settings.version }}</el-tag>
+          <el-tag v-if="settings" size="small" effect="plain">FNPak · 非官方 · 版本 {{ settings.version }}</el-tag>
           <div class="spacer" />
           <el-button size="small" :loading="loading" @click="loadAll">刷新</el-button>
         </div>
@@ -94,6 +94,22 @@
 
     <el-card shadow="never" class="card" style="margin-top: 12px">
       <template #header>
+        <div class="card-head"><span class="title">账号</span></div>
+      </template>
+      <dl class="kv">
+        <dt>当前账号</dt>
+        <dd>{{ state.auth.authenticated ? (state.auth.displayName || state.auth.account || '已登录') : '未登录' }}</dd>
+        <dt>登录状态</dt>
+        <dd>{{ state.auth.authenticated ? '已登录' : '未登录' }}</dd>
+      </dl>
+      <div class="toolbar" style="margin-top: 10px">
+        <el-button size="small" type="danger" plain :loading="logoutBusy" @click="logout">退出登录</el-button>
+        <span class="hint">会清除本机登录态，云端文件不受影响</span>
+      </div>
+    </el-card>
+
+    <el-card shadow="never" class="card" style="margin-top: 12px">
+      <template #header>
         <div class="card-head"><span class="title">下载并发</span></div>
       </template>
       <el-form label-position="top" :inline="true">
@@ -140,12 +156,15 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, errorDetail } from '../api'
-import { state } from '../store'
+import { refreshAuth, state } from '../store'
 
+const router = useRouter()
 const settings = ref(null)
 const loading = ref(false)
 const loadError = ref('')
+const logoutBusy = ref(false)
 
 const newPasscode = ref('')
 const passcodeBusy = ref(false)
@@ -286,5 +305,22 @@ async function copyDiagnostics() {
   }
 }
 
-onMounted(loadAll)
+/**
+ * 退出登录：只清本机 PikPak 会话（access/refresh token），不动云端文件。
+ * 清完后回到首页的账号/口令入口，由用户重新登录。
+ */
+async function logout() {
+  if (logoutBusy.value) return
+  logoutBusy.value = true
+  await api('/api/auth/logout', { method: 'POST' })
+  logoutBusy.value = false
+  await refreshAuth()
+  router.push('/')
+}
+
+onMounted(async () => {
+  // 直接打开 /settings 时首页还没拉过账号态，这里补一次，账号区块才不会误显示“未登录”
+  await refreshAuth()
+  await loadAll()
+})
 </script>

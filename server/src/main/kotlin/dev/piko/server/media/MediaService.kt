@@ -152,7 +152,7 @@ class MediaService(private val repository: PikoDriveRepository) : AutoCloseable 
                     }
                     override val headers = Headers.build {
                         append(HttpHeaders.AcceptRanges, "bytes")
-                        append("X-Piko-Media-Mode", modeName(meta.mode))
+                        append("X-FNPak-Media-Mode", modeName(meta.mode))
                         if (slice != null) {
                             append(HttpHeaders.ContentRange, "bytes ${slice.start}-${slice.endInclusive}/${meta.sizeBytes}")
                         }
@@ -180,7 +180,7 @@ class MediaService(private val repository: PikoDriveRepository) : AutoCloseable 
             // 302 之后浏览器直接向 PikPak 发 Range；这里不读上游，省带宽
             call.response.header(HttpHeaders.Location, meta.directUrl)
             call.response.header(HttpHeaders.AcceptRanges, "bytes")
-            call.response.header("X-Piko-Media-Mode", "redirect")
+            call.response.header("X-FNPak-Media-Mode", "redirect")
             call.respondText("", status = HttpStatusCode.Found)
             return
         }
@@ -221,7 +221,7 @@ class MediaService(private val repository: PikoDriveRepository) : AutoCloseable 
                 val contentType = contentTypeOf(meta, upstream.headers[HttpHeaders.ContentType])
 
                 call.response.header(HttpHeaders.AcceptRanges, "bytes")
-                call.response.header("X-Piko-Media-Mode", "proxy")
+                call.response.header("X-FNPak-Media-Mode", "proxy")
                 // 长度交给 respondOutputStream 一起设置：手动写 Header 会同时产生 chunked，
                 // 两个长度来源并存对播放器的 Range 计算不友好
                 val declaredLength: Long? = if (finalStatus == HttpStatusCode.PartialContent && slice != null) {

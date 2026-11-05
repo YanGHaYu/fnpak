@@ -51,7 +51,7 @@ fun Route.authRoutes(graph: ServiceGraph) {
         }
 
         /**
-         * 导入已有会话，绕开验证码。会话写进 `$piko.home/accounts/`，由 SDK 负责后续刷新。
+         * 导入已有会话，绕开验证码。会话写进 `$fnpak.home/accounts/`，由 SDK 负责后续刷新。
          * 204 表示导入成功；401 表示服务端拒绝了这个令牌（不是「格式不对」）。
          */
         post("/token") {

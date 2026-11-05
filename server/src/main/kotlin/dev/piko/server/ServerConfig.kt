@@ -9,12 +9,12 @@ import java.nio.file.Path
  *
  * - 端口：`--port` / `--port=18080` > `PORT` > [DEFAULT_PORT]
  * - 监听地址：`--host` > [DEFAULT_HOST]
- * - 访问口令：`--access-token` > `PIKO_SERVER_TOKEN` > 数据目录的 `access-token` 文件 > 无口令状态（首次设置向导）。
+ * - 访问口令：`--access-token` > `FNPAK_SERVER_TOKEN`（兼容旧名 `PIKO_SERVER_TOKEN`）> 数据目录的 `access-token` 文件 > 无口令状态（首次设置向导）。
  *   前两者算「外部托管」（[accessTokenManagedExternally]），此时页面不允许改口令。
  * - 首次设置窗口：`--setup-window-minutes`（默认 15，0 = 不限），超时后只允许命令行重置。
- * - 数据根目录：系统属性 `piko.home`，由 fpk 的 cmd/main 注入 `$TRIM_PKGVAR`；未给时退回 `~/.piko`
+ * - 数据根目录：系统属性 `fnpak.home`（兼容旧名 `piko.home`），由 fpk 的 cmd/main 注入 `$TRIM_PKGVAR`；未给时退回 `~/.fnpak`
  * - 下载目录：`<home>/settings.json` 里的 `downloadDir`（存在且目录还在）> `TRIM_DATA_SHARE_PATHS` 第一项 + `/downloads`
- *   > `-Dpiko.downloadDir` > 系统临时目录下的 `piko-downloads`
+ *   > `-Dfnpak.downloadDir`（兼容旧名 `piko.downloadDir`）> 系统临时目录下的 `fnpak-downloads`
  * - 共享根：`TRIM_DATA_SHARE_PATHS`（冒号分隔），设置页的下载位置只能落在这些根下面
  *
  * 口令与下载目录都收敛成「文件里说了算」：进程启动时读文件，运行期改了就原子写回文件，
@@ -54,12 +54,14 @@ data class ServerConfig(
     companion object {
         const val DEFAULT_PORT = 18080
         const val DEFAULT_HOST = "127.0.0.1"
-        const val VERSION = "0.5.0"
+        const val APP_NAME = "FNPak"
+        const val VERSION = "0.7.0"
 
         fun from(args: Array<String>): ServerConfig {
             var host = DEFAULT_HOST
             var port = envPort() ?: DEFAULT_PORT
-            var token = System.getenv("PIKO_SERVER_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
+            var token = (System.getenv("FNPAK_SERVER_TOKEN") ?: System.getenv("PIKO_SERVER_TOKEN"))
+                ?.trim()?.takeIf { it.isNotEmpty() }
             var external = token != null
             var setupWindowMinutes = 15
             var index = 0
@@ -105,8 +107,9 @@ data class ServerConfig(
 
             // 不再因为「非回环 + 没给口令」而拒绝启动：口令缺失时进入首次设置向导（无口令状态），
             // 不会静默生成文件。这样 fpk 里不需要再有一个「外部注入口令」的脚本角色。
-            val home = System.getProperty("piko.home")?.takeIf { it.isNotBlank() }?.let(Path::of)
-                ?: Path.of(System.getProperty("user.home"), ".piko")
+            val home = (System.getProperty("fnpak.home") ?: System.getProperty("piko.home"))
+                ?.takeIf { it.isNotBlank() }?.let(Path::of)
+                ?: Path.of(System.getProperty("user.home"), ".fnpak")
             val normalizedHome = home.toAbsolutePath().normalize()
             val declared = envPaths("TRIM_DATA_SHARE_PATHS")
             val authorized = envPaths("TRIM_DATA_ACCESSIBLE_PATHS")
@@ -145,17 +148,18 @@ data class ServerConfig(
         private fun resolveDownloadDir(home: Path, shares: List<Path>): Path {
             // 首选「第一个可写」的授权目录：第一个可能只是只读挂载，直接 mkdir 会让启动失败
             shares.firstOrNull()?.takeIf { !Files.isWritable(it) }?.let {
-                System.err.println("[W] Server: 第一个授权目录不可写：$it，改用下一个可写的目录")
+                System.err.println("[W] FNPak: 第一个授权目录不可写：$it，改用下一个可写的目录")
             }
             val writable = shares.firstOrNull { Files.isWritable(it) }
             if (writable == null && shares.isNotEmpty()) {
-                System.err.println("[W] Server: ${shares.size} 个授权目录都不可写，下载目录回落到 $home/downloads")
+                System.err.println("[W] FNPak: ${shares.size} 个授权目录都不可写，下载目录回落到 $home/downloads")
             }
             if (shares.isEmpty()) {
-                System.err.println("[W] Server: 没有共享根或授权目录（TRIM_DATA_SHARE_PATHS / TRIM_DATA_ACCESSIBLE_PATHS 均为空），下载目录回落到 $home/downloads")
+                System.err.println("[W] FNPak: 没有共享根或授权目录（TRIM_DATA_SHARE_PATHS / TRIM_DATA_ACCESSIBLE_PATHS 均为空），下载目录回落到 $home/downloads")
             }
             val fallback = writable?.resolve("downloads")
-                ?: System.getProperty("piko.downloadDir")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
+                ?: (System.getProperty("fnpak.downloadDir") ?: System.getProperty("piko.downloadDir"))
+                    ?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
                 ?: home.resolve("downloads")
             val persisted = ServerSettingsFile.load(home)?.downloadDir
                 ?.takeIf { it.isNotBlank() }
@@ -163,7 +167,7 @@ data class ServerConfig(
             if (persisted == null) return fallback.toAbsolutePath().normalize()
             if (Files.isDirectory(persisted)) return persisted
             System.err.println(
-                "[W] Server: settings.json 里的下载目录已不存在：$persisted，回落到 ${fallback.toAbsolutePath().normalize()}",
+                "[W] FNPak: settings.json 里的下载目录已不存在：$persisted，回落到 ${fallback.toAbsolutePath().normalize()}",
             )
             return fallback.toAbsolutePath().normalize()
         }
