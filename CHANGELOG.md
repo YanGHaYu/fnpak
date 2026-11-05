@@ -2,6 +2,21 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.8.0 — UI 重构（双端布局）
+
+- 移除 Element Plus（及图标包），改为 **Tailwind CSS v4（Vite 插件）+ reka-ui** 无样式底层 + 自建轻量组件：Button / IconButton / Dialog / Sheet（移动抽屉）/ Popover / Menu / Checkbox / Toast / Progress / Skeleton / Tabs
+- 设计 token 化（颜色/间距/字号/圆角/阴影全部 CSS 变量），明暗主题沿用 `fnpak-theme` 键（读不到回退 `piko-theme`，老设置不丢）；断点 `sm 640 / md 768 / lg 1024 / xl 1280`
+- 统一 AppShell：桌面（≥1024）顶部品牌 + Tab + 设置入口，内容区限宽 1280 居中；移动（<768）紧凑顶栏 + 底部四 Tab（目录 / 本机下载 / 离线任务 / 回收站）+ 安全区 padding
+- 目录、本机下载、离线任务、回收站统一为「行式卡片列表」：主行图标/名称/大小/状态/进度，失败原因与速率在第二行或展开区；完成/失败用色彩与图标区分
+- 多选：行首 checkbox，移动端长按 500ms 进入选择模式；批量条移动端固定底部安全区、桌面悬浮内容区底部，列表预留底部空间，不遮最后一行
+- 行内 `⋯` 浮层：桌面 hover、移动点击，只作用于当前行；已完成行不出现下载控制按钮
+- 大列表：目录/任务/子项改用增量渲染（首屏 40 项、滚动哨兵或「加载更多」追加），320+ 项与展开子项不再一次性挂载；展开仍保留 `childCount > 本地子项数` 补拉
+- SSE 逻辑不变：继续按 id merge，子项不会因增量事件丢失归属
+- 播放器：移动端全屏弹层，PC 弹层尺寸合理；弹层均支持 esc / 遮罩关闭与键盘操作
+- 可访问性：触控目标 ≥44px、`:focus-visible` 可见、对比度达标、弹层有标题与关闭按钮
+- 体积：JS 562.1 kB → 282.7 kB（gzip 190.9 → 96.8 kB）；CSS 148.0 kB → 26.9 kB（gzip 21.1 → 6.1 kB）
+- 版本 `0.8.0`（manifest / `ServerConfig` / `/api/health` / `package.json` 与构建产出一致）；API 契约完全不变
+
 ## 0.7.1 — 只重试失败项（断点续传）
 
 - 新增 `POST /api/downloads/{id}/retry` 与 `POST /api/downloads/groups/{id}/retry`：只挑失败/中断的子项重试，已完成、下载中、排队中的一律不动
