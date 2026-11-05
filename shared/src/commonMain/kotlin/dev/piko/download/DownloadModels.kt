@@ -100,6 +100,13 @@ data class DownloadTask(
     fun belongsTo(account: String): Boolean = this.account.isEmpty() || this.account == account
 }
 
+/** 重试单个任务的结果：被拒绝时带上能直接显示给用户的原因，路由据此回 409。 */
+data class DownloadRetryOutcome(
+    val taskId: String,
+    val accepted: Boolean,
+    val reason: String? = null,
+)
+
 /** 一次文件夹下载。同一批的任务落在下载目录里同一个文件夹下，传输页收成一组。 */
 @Serializable
 data class DownloadBatch(

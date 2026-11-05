@@ -355,6 +355,16 @@ data class DownloadListResponse(
     val groups: List<DownloadGroupItem> = emptyList(),
 )
 
+/** 重试单个任务或整批失败项的回包；`skipped` 是被拒绝的项与可读原因。 */
+@Serializable
+data class DownloadRetryResponse(
+    val retried: List<String> = emptyList(),
+    val skipped: List<SkippedFile> = emptyList(),
+    val message: String = "",
+    val items: List<DownloadItem> = emptyList(),
+    val groups: List<DownloadGroupItem> = emptyList(),
+)
+
 @Serializable
 data class StartDownloadRequest(val fileId: String = "")
 
@@ -552,6 +562,8 @@ data class DownloadProgressEvent(
     val groupId: String = "",
     /** 分段下载时各段的进度；其他下载方式没有这个字段（保持原字段不变，只做新增）。 */
     val segments: List<dev.piko.download.DownloadSegmentInfo>? = null,
+    /** 失败原因（HTTP 状态 / 直链失效 / 空间不足等）；成功或进行中为 null。 */
+    val error: String? = null,
 )
 
 @Serializable

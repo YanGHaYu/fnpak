@@ -65,7 +65,7 @@ private suspend fun streamDownloads(graph: ServiceGraph, out: SendChannel<String
     val sent = mutableMapOf<String, String>()
     graph.downloadCoordinator.tasks.collect { tasks ->
         for (task in tasks.values) {
-            val stamp = "${task.downloadedBytes}/${task.totalBytes}/${task.status}/${task.speedBytesPerSec}/${task.segments?.hashCode()}"
+            val stamp = "${task.downloadedBytes}/${task.totalBytes}/${task.status}/${task.speedBytesPerSec}/${task.segments?.hashCode()}/${task.errorMessage}"
             if (sent[task.taskId] == stamp) continue
             sent[task.taskId] = stamp
             val event = DownloadProgressEvent(
@@ -80,6 +80,8 @@ private suspend fun streamDownloads(graph: ServiceGraph, out: SendChannel<String
                 parentTaskId = task.parentTaskId,
                 groupId = task.effectiveGroupId(),
                 segments = task.segments,
+                // 失败原因随进度事件一起推，页面不必等下次刷新才看得见
+                error = task.errorMessage,
             )
             out.send("event: download.progress\ndata: ${json.encodeToString(event)}\n\n")
         }

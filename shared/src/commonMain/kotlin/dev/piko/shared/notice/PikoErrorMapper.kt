@@ -46,6 +46,105 @@ object PikoErrorMapper {
         else -> tr("未知错误", "Unknown error", "不明なエラー", "알 수 없는 오류", "未知錯誤")
     }
 
+    /**
+     * 下载失败的可读原因：保留 HTTP 状态与关键线索，但不把整段异常/JSON 抛给用户。
+     * 失败行要让人判断「值不值得重试」：直链失效、云端 404、磁盘不足、目录不可写都单独成句。
+     */
+    fun download(error: Throwable): String {
+        if (isReactivating(error)) return reactivatingMessage
+        if (error is InstantContentUnavailableException) return tr(
+            "离线任务尚未就绪或云端未收录此文件，请稍后再试",
+            "The offline task is not ready yet or the file is not indexed; try again later",
+            "オフラインタスクが未完了、またはクラウドに未収録です。しばらくしてから再試行してください",
+            "오프라인 작업이 아직 준비되지 않았거나 클라우드에 등록되지 않았습니다. 잠시 후 다시 시도해 주세요",
+            "離線任務尚未就緒或雲端未收錄此檔案，請稍後再試",
+        )
+        val chain = generateSequence(error) { it.cause }.toList()
+        val api = chain.filterIsInstance<PikPakException>().firstOrNull()
+        if (api != null) {
+            val status = api.httpStatus
+            return when {
+                status == 404 || api.errorMessage == "file_not_found" -> tr(
+                    "云端文件不存在或已被删除（HTTP 404）",
+                    "The cloud file no longer exists or was deleted (HTTP 404)",
+                    "クラウド上のファイルが存在しないか削除されました（HTTP 404）",
+                    "클라우드 파일이 없거나 삭제되었습니다(HTTP 404)",
+                    "雲端檔案不存在或已被刪除（HTTP 404）",
+                )
+                status == 401 || status == 403 -> tr(
+                    "云端拒绝访问（HTTP $status），直链可能已失效",
+                    "Cloud access denied (HTTP $status); the direct link may have expired",
+                    "クラウドがアクセスを拒否しました（HTTP $status）。直リンクが失効した可能性があります",
+                    "클라우드가 접근을 거부했습니다(HTTP $status). 직링크가 만료되었을 수 있습니다",
+                    "雲端拒絕存取（HTTP $status），直鏈可能已失效",
+                )
+                status != null -> tr(
+                    "云端请求失败（HTTP $status）",
+                    "Cloud request failed (HTTP $status)",
+                    "クラウドへのリクエストに失敗しました（HTTP $status）",
+                    "클라우드 요청 실패(HTTP $status)",
+                    "雲端請求失敗（HTTP $status）",
+                )
+                else -> reason(api.errorMessage) ?: tr(
+                    "云端请求失败",
+                    "Cloud request failed",
+                    "クラウドへのリクエストに失敗しました",
+                    "클라우드 요청 실패",
+                    "雲端請求失敗",
+                )
+            }
+        }
+        val details = chain.mapNotNull { it.message?.takeIf { m -> m.isNotBlank() } }.joinToString("；")
+        val status = Regex("HTTP (\\d{3})").find(details)?.groupValues?.get(1)
+        return when {
+            details.contains("No space left", ignoreCase = true) || details.contains("ENOSPC") -> tr(
+                "磁盘空间不足，无法继续写入",
+                "Not enough disk space to continue writing",
+                "ディスク容量が不足しているため書き込みを続けられません",
+                "디스크 공간이 부족하여 쓰기를 계속할 수 없습니다",
+                "磁碟空間不足，無法繼續寫入",
+            )
+            details.contains("Permission denied", ignoreCase = true) ||
+                details.contains("Read-only file system", ignoreCase = true) -> tr(
+                "下载目录不可写（权限不足或只读挂载）",
+                "Download folder is not writable (permission denied or read-only mount)",
+                "ダウンロード先に書き込めません（権限不足または読み取り専用マウント）",
+                "다운로드 폴더에 쓸 수 없습니다(권한 부족 또는 읽기 전용 마운트)",
+                "下載目錄無法寫入（權限不足或唯讀掛載）",
+            )
+            details.contains("直链失效") -> tr(
+                "直链失效（签名已过期或链接不可达）",
+                "Direct link expired (signature expired or unreachable)",
+                "直リンクが失効しました（署名切れまたは到達不能）",
+                "직링크가 만료되었습니다(서명 만료 또는 연결 불가)",
+                "直鏈失效（簽名已過期或連結無法連線）",
+            )
+            status != null -> tr(
+                "下载请求失败（HTTP $status）",
+                "Download request failed (HTTP $status)",
+                "ダウンロード要求に失敗しました（HTTP $status）",
+                "다운로드 요청 실패(HTTP $status)",
+                "下載請求失敗（HTTP $status）",
+            )
+            details.contains("上游提前结束") || details.contains("上游忽略 Range") -> tr(
+                "连接中断，本次没有写完（可直接重试续传）",
+                "Connection interrupted before completion (retry to resume)",
+                "接続が途中で切れ、書き込みが完了しませんでした（再試行で続きから再開できます）",
+                "연결이 끊겨 끝까지 쓰지 못했습니다(재시도하면 이어서 받을 수 있습니다)",
+                "連線中斷，本次未寫完（可直接重試續傳）",
+            )
+            error is IOException -> tr(
+                "网络中断，可直接重试续传",
+                "Network interrupted; retry to resume",
+                "ネットワークが切断されました。再試行で続きから再開できます",
+                "네트워크가 끊겼습니다. 재시도하면 이어서 받을 수 있습니다",
+                "網路中斷，可直接重試續傳",
+            )
+            details.isNotEmpty() -> details
+            else -> tr("未知错误", "Unknown error", "不明なエラー", "알 수 없는 오류", "未知錯誤")
+        }
+    }
+
     fun archive(error: Throwable): String = when (error) {
         is PikPakException -> reason(error.errorMessage) ?: message(error)
         is IllegalStateException -> error.message ?: tr("未知错误", "Unknown error", "不明なエラー", "알 수 없는 오류", "未知錯誤")

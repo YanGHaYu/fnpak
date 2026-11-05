@@ -9,6 +9,7 @@ import dev.piko.server.DownloadListResponse
 import dev.piko.server.DownloadRecordDeleteFailure
 import dev.piko.server.DownloadRecordDeleteRequest
 import dev.piko.server.DownloadRecordDeleteResponse
+import dev.piko.server.DownloadRetryResponse
 import dev.piko.server.FolderDownloadRequest
 import dev.piko.server.FolderDownloadResponse
 import dev.piko.server.MixedDownloadRequest
@@ -323,6 +324,57 @@ fun Route.downloadRoutes(graph: ServiceGraph) {
             call.respond(graph.downloadListResponse())
         }
 
+        /**
+         * 批量重试父任务里**只处于失败**的子项：已完成的、正在下载/排队的、用户暂停的一律不动。
+         * `single:<taskId>` 也能用；返回每个失败项的结果与可读原因。
+         */
+        post("/groups/{id}/retry") {
+            if (graph.requireLogin(call)) return@post
+            val id = call.parameters["id"].orEmpty()
+            if (id.isEmpty()) {
+                return@post call.respondError(HttpStatusCode.BadRequest, "missing_group_id", "缺少父任务 ID")
+            }
+            graph.downloadDirProblem()?.let { problem ->
+                return@post call.respondError(HttpStatusCode.Conflict, "download_dir_unusable", problem)
+            }
+            val outcomes = graph.downloadCoordinator.retryFailedInGroup(id)
+            val retried = outcomes.filter { it.accepted }.map { it.taskId }
+            val skipped = outcomes.filterNot { it.accepted }
+                .map { SkippedFile(it.taskId, it.reason ?: "无法重试") }
+            if (retried.isEmpty()) {
+                val known = if (id.startsWith("single:")) {
+                    graph.downloadCoordinator.tasks.value.containsKey(id.removePrefix("single:"))
+                } else {
+                    graph.downloadCoordinator.tasks.value.values.any { it.batch?.id == id || it.parentTaskId == id }
+                }
+                val scanning = graph.downloadCoordinator.listings.value.containsKey(id) ||
+                    graph.mixedScanRegistry.scans.value.containsKey(id)
+                return@post call.respondError(
+                    HttpStatusCode.Conflict,
+                    when {
+                        known -> "nothing_to_retry"
+                        scanning -> "group_not_ready"
+                        else -> "group_not_found"
+                    },
+                    when {
+                        known -> skipped.firstOrNull()?.reason ?: "没有处于失败状态的子项"
+                        scanning -> "云端目录仍在扫描，暂时无法重试"
+                        else -> "任务记录不存在"
+                    },
+                )
+            }
+            val list = graph.downloadListResponse()
+            call.respond(
+                DownloadRetryResponse(
+                    retried = retried,
+                    skipped = skipped,
+                    message = "已重试 ${retried.size} 个失败项，只补齐各自未完成的区间",
+                    items = list.items,
+                    groups = list.groups,
+                ),
+            )
+        }
+
         /** 取消父任务：子项全部停下，**已下载的文件保留**（不调用会删文件的 cancelBatch）。 */
         post("/groups/{id}/cancel") {
             val id = call.parameters["id"].orEmpty()
@@ -405,6 +457,38 @@ fun Route.downloadRoutes(graph: ServiceGraph) {
             )
         }
 
+        /**
+         * 单条重试（行内 `⋯` 的「重试」）：只接受失败/中断的任务。
+         * 已完成、正在下载或排队中的直接 409 + 可读原因，不产生重复任务。
+         */
+        post("/{id}/retry") {
+            if (graph.requireLogin(call)) return@post
+            val id = call.parameters["id"].orEmpty()
+            if (id.isEmpty()) {
+                return@post call.respondError(HttpStatusCode.BadRequest, "missing_task_id", "缺少任务 ID")
+            }
+            graph.downloadDirProblem()?.let { problem ->
+                return@post call.respondError(HttpStatusCode.Conflict, "download_dir_unusable", problem)
+            }
+            val outcome = graph.downloadCoordinator.retryTask(id)
+            if (!outcome.accepted) {
+                return@post call.respondError(
+                    HttpStatusCode.Conflict,
+                    "retry_rejected",
+                    outcome.reason ?: "该任务当前无法重试",
+                )
+            }
+            val list = graph.downloadListResponse()
+            call.respond(
+                DownloadRetryResponse(
+                    retried = listOf(id),
+                    message = "已重新开始，只补齐未完成的区间",
+                    items = list.items,
+                    groups = list.groups,
+                ),
+            )
+        }
+
         post("/{id}/pause") {
             graph.downloadCoordinator.pauseDownload(call.parameters["id"].orEmpty())
             call.respond(graph.downloadListResponse())
@@ -446,6 +530,20 @@ private fun DownloadTask.toItem() = DownloadItem(
     batchName = batch?.folderName.orEmpty(),
     batchIsFolder = batch?.isFolder == true,
 )
+
+/**
+ * 重试前的落盘体检：目录不存在 / 不可写 / 磁盘满都回可读错误，
+ * 而不是等下载协程抛出裸异常后只在日志里看得见。
+ */
+private fun ServiceGraph.downloadDirProblem(): String? {
+    val dir = downloadDirectory
+    return when {
+        !dir.exists() -> "下载目录不存在：${dir.path}"
+        !dir.canWrite() -> "下载目录不可写：${dir.path}"
+        dir.totalSpace > 0 && dir.usableSpace <= 0L -> "下载磁盘空间不足：${dir.path}"
+        else -> null
+    }
+}
 
 private fun uniqueDownloadPath(raw: String, taken: MutableSet<String>, keepExtension: Boolean): String {
     if (taken.add(raw.lowercase())) return raw

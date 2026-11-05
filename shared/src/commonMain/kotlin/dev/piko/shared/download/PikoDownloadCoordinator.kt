@@ -5,9 +5,11 @@ import dev.piko.shared.i18n.tr
 import dev.piko.data.auth.PikoUserPreferences
 import dev.piko.data.repository.FileNameSanitizer
 import dev.piko.download.DownloadBatch
+import dev.piko.download.DownloadRetryOutcome
 import dev.piko.download.DownloadStatus
 import dev.piko.download.DownloadTask
 import dev.piko.download.DownloadedSpan
+import dev.piko.shared.notice.PikoErrorMapper
 import dev.piko.shared.data.LeasedFile
 import dev.piko.shared.data.PikoClientProvider
 import dev.piko.shared.log.PikoLog
@@ -764,6 +766,53 @@ class PikoDownloadCoordinator(
         pumpQueue()
     }
 
+    /**
+     * 只重试失败/中断的任务：保持 `completedRanges` 与 `downloadedBytes`，重新排队后由下载器从断点补齐。
+     * 已在跑或排队的任务直接拒绝并给出可读原因，避免建重复任务或重复占盘。
+     * 直链不在这里传：`SegmentDownloader` 每次开始都按 `fileId` 重新取详情拿新直链。
+     */
+    fun retryTask(taskId: String): DownloadRetryOutcome {
+        val task = _tasks.value[taskId]
+            ?: return DownloadRetryOutcome(taskId, false, tr("任务记录不存在或已被删除", "Task record not found or deleted", "タスク記録が存在しないか削除されました", "작업 기록이 없거나 삭제되었습니다", "任務記錄不存在或已被刪除"))
+        if (jobs.value[taskId]?.isActive == true) {
+            return DownloadRetryOutcome(taskId, false, tr("该文件正在下载中，请等它结束或先暂停", "This file is downloading; wait for it to finish or pause it first", "このファイルはダウンロード中です。終了を待つか一時停止してください", "이 파일은 다운로드 중입니다. 완료를 기다리거나 먼저 일시중지하세요", "該檔案正在下載中，請等它結束或先暫停"))
+        }
+        when (task.status) {
+            DownloadStatus.DOWNLOADING, DownloadStatus.PENDING -> return DownloadRetryOutcome(
+                taskId, false, tr("该文件正在下载中或排队中，不会重复建任务", "This file is already downloading or queued; no duplicate task was created", "このファイルはダウンロード中または待機中です。重複タスクは作成しません", "이 파일은 이미 다운로드 중이거나 대기 중입니다. 중복 작업을 만들지 않습니다", "該檔案正在下載中或排隊中，不會重複建立任務"),
+            )
+            DownloadStatus.COMPLETED -> return DownloadRetryOutcome(
+                taskId, false, tr("该文件已下载完成，无需重试", "This file is already complete; no retry needed", "このファイルはダウンロード済みです。再試行は不要です", "이 파일은 이미 완료되었습니다. 재시도할 필요가 없습니다", "該檔案已下載完成，無需重試"),
+            )
+            else -> Unit
+        }
+        if (!belongsToCurrent(task)) {
+            return DownloadRetryOutcome(taskId, false, tr("该任务属于其他账号，请切回对应账号后再试", "This task belongs to another account; switch back to it first", "このタスクは別のアカウントに属しています。該当アカウントに切り替えてください", "이 작업은 다른 계정에 속합니다. 해당 계정으로 전환한 후 시도하세요", "該任務屬於其他帳號，請切回對應帳號後再試"))
+        }
+        PikoLog.i(TAG, "重试：${logFile(task.fileId, task.fileName)}，原状态=${task.status}，" +
+            "已落盘 ${task.downloadedBytes}/${task.totalBytes} 字节，" +
+            if (task.completedRanges.isEmpty()) "无续传记录，从头下载" else "续传 ${task.completedRanges.size} 段，只补未完成区间")
+        // 只改状态，completedRanges / downloadedBytes / fileName 一律保留，续传点由下载器按区间补齐
+        update(taskId) {
+            it.copy(status = DownloadStatus.PENDING, errorMessage = null, speedBytesPerSec = 0L, segments = null)
+        }
+        pumpQueue()
+        return DownloadRetryOutcome(taskId, true)
+    }
+
+    /**
+     * 批量重试一个父任务里**只处于失败**的子项；已完成、排队中、下载中、暂停的都不动。
+     * 返回每个失败项的结果，调用方据此汇总「已重试 N 项 / 被拒绝 M 项」。
+     */
+    fun retryFailedInGroup(groupId: String): List<DownloadRetryOutcome> {
+        val tasks = if (groupId.startsWith("single:")) {
+            _tasks.value[groupId.removePrefix("single:")]?.let { listOf(it) }.orEmpty()
+        } else {
+            _tasks.value.values.filter { it.batch?.id == groupId || it.parentTaskId == groupId }
+        }
+        return tasks.filter { it.status == DownloadStatus.FAILED }.map { retryTask(it.taskId) }
+    }
+
     private fun launchDownload(taskId: String) {
         val task = _tasks.value[taskId] ?: return
         // 文件 ID 与直链只在源账号里有效，换到别的账号上取不到
@@ -911,7 +960,9 @@ class PikoDownloadCoordinator(
                 (if (_tasks.value[taskId]?.converting == true) "，失败在转封装" else ""), e)
             // 转封装失败时转码流仍完整留在暂存里，重试只重做转封装
             update(taskId) { it.copy(status = if (belongsToCurrent(it)) DownloadStatus.FAILED else DownloadStatus.PAUSED, speedBytesPerSec = 0L,
-                downloadedBytes = lease?.entry?.store?.heldBytes?.value ?: it.downloadedBytes, errorMessage = e.message,
+                downloadedBytes = lease?.entry?.store?.heldBytes?.value ?: it.downloadedBytes,
+                // 失败行要能看出原因（HTTP 状态 / 直链失效 / 空间不足 / 目录不可写），原始堆栈只进日志
+                errorMessage = PikoErrorMapper.download(e),
                 converting = false, progressFraction = null) }
         } finally {
             val currentLease = lease
@@ -1162,7 +1213,7 @@ class PikoDownloadCoordinator(
                 }
             }.onFailure { error ->
                 PikoLog.w(TAG, "片段抽取失败：${logFile(task.fileId, task.fileName)}，${task.startMs}–${task.endMs} ms", error)
-                update(task.taskId) { it.copy(status = DownloadStatus.FAILED, errorMessage = error.message) }
+                update(task.taskId) { it.copy(status = DownloadStatus.FAILED, errorMessage = PikoErrorMapper.download(error)) }
             }
         }
     }
