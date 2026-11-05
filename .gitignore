@@ -33,3 +33,15 @@ web-ui/node_modules/
 web-ui/dist/
 web-ui/.vite/
 npm-debug.log*
+
+# 运行时状态与产物：绝不入库
+access-token
+accounts.json
+settings.json
+download-tasks.json
+*.fpk
+hs_err_pid*.log
+*.pid
+fnos/app/bin/
+fnos/app/lib/
+dist/

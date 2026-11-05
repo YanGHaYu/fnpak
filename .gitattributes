@@ -5,3 +5,8 @@
 
 # 在 macOS 与 Linux 上执行的脚本一律 LF：Windows 上打的包也带着 apply-update-mac.sh，带着 CR 的 bash 脚本跑不起来
 *.sh text eol=lf
+
+# gradlew 没有扩展名，之前漏配导致 Windows 检出后 CRLF / 不可执行
+gradlew text eol=lf
+*.bat text eol=crlf
+*.kts text eol=lf
