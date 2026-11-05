@@ -54,7 +54,7 @@ data class ServerConfig(
     companion object {
         const val DEFAULT_PORT = 18080
         const val DEFAULT_HOST = "127.0.0.1"
-        const val VERSION = "0.4.0"
+        const val VERSION = "0.4.1"
 
         fun from(args: Array<String>): ServerConfig {
             var host = DEFAULT_HOST

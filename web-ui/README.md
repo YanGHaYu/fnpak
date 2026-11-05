@@ -32,8 +32,11 @@ cp -a dist/assets ../server/src/main/resources/web/assets
 
 | 路径 | 内容 |
 | --- | --- |
-| `/` | 目录浏览、本机下载、云端离线任务、链接解析、播放器 |
+| `/` | 三个 Tab：目录浏览（多选/文件夹下载/移入回收站）、本机下载、云端离线任务；链接解析、播放器 |
 | `/settings` | 访问口令、下载位置、下载并发、版本与日志 |
+
+- 首次运行（服务端没有 `access-token` 文件）时首页被替换为独立的「首次设置访问口令」页（`SetupView.vue`），不弹窗；`GET /api/setup/state` 免口令，返回 `needsSetup` / `reason` / `setupWindowOpen`。老用户已有 token 文件或外部注入 `PIKO_SERVER_TOKEN` 时不出现该页。
+- 设置窗口默认 15 分钟，可用 `--setup-window-minutes` 调整（0 = 不限）；忘记口令时删除 token 文件后重启即重新进入向导。
 
 - 单页应用用 `createWebHistory()`；服务端 `StaticRoutes.kt` 对**所有非 `/api` 路径**回 `index.html`（带扩展名的缺失文件仍返回 404 JSON），所以刷新 `/settings` 不会 404。
 - 接口错误统一是 `{"error":{"code","message"}}`；`api.js` 把 `401 access_denied` 交给全局处理器，界面回到口令卡（`GateView`）。

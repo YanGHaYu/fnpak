@@ -61,7 +61,7 @@ fun Route.accessRoutes(access: AccessControl) {
  * 直接拼 Set-Cookie 而不是用 Ktor 的 Cookie 对象：后者会给每个值补一个 `$x-enc=…`
  * 扩展属性，浏览器虽然忽略，但抓包时容易让人误以为多了个开关。
  */
-private fun ApplicationCall.setSessionCookie(value: String, maxAgeSeconds: Int) {
+internal fun ApplicationCall.setSessionCookie(value: String, maxAgeSeconds: Int) {
     response.headers.append(
         HttpHeaders.SetCookie,
         "$COOKIE_NAME=$value; Max-Age=$maxAgeSeconds; Path=/; HttpOnly; SameSite=Lax",

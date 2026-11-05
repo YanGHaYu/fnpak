@@ -1,8 +1,10 @@
 package dev.piko.server
 
 import dev.piko.server.access.AccessControl
+import dev.piko.server.access.AccessSetup
 import dev.piko.server.access.accessGuard
 import dev.piko.server.access.accessRoutes
+import dev.piko.server.access.setupRoutes
 import dev.piko.server.auth.authRoutes
 import dev.piko.server.download.downloadRoutes
 import dev.piko.server.drive.driveRoutes
@@ -34,8 +36,8 @@ private const val TAG = "Server"
  * `-Dpiko.home` 必须在任何 `PikoHome` / 会话存储被访问之前设好：`DesktopSessionStore` 的根目录
  * 与日志目录都由它决定，晚了就会在 `~/.piko` 下建出第二份登录态。
  *
- * 口令校验在本进程内完成：没给口令的非回环监听在 [ServerConfig.from] 就被拒绝（退出码 2），
- * 回环监听未给口令则现场生成一份并写进数据目录，只在该次启动打印一次。
+ * 口令校验在本进程内完成：没给口令时进入「首次设置向导」（无口令状态），由用户在页面设置后落盘；
+ * 已有 token 文件或外部注入则直接启用，老用户不受影响。
  */
 fun main(args: Array<String>) {
     val config = try {
@@ -57,17 +59,19 @@ fun main(args: Array<String>) {
     PikoLog.i(TAG, "启动：home=${config.home}，日志目录=$logDirectory")
 
     val access = AccessControl.resolve(config)
-    if (access.generatedPasscode != null) {
-        // 明文只在文件里：这里只提示路径与指纹，日志/终端被贴出去也不会泄露口令
-        val file = config.home.resolve("access-token")
-        PikoLog.w(TAG, "未配置访问口令，已生成随机口令并写入 $file（权限 0600），指纹 sha256[:8]=${access.control.fingerprint}")
-        System.err.println("访问口令已生成：$file（权限 0600，用 cat 读取，切勿贴到聊天或工单里）")
+    if (access.needsSetup) {
+        PikoLog.w(
+            TAG,
+            "无口令状态（首次运行）：未找到 ${config.home.resolve("access-token")}，不会自动生成；" +
+                "请在页面首次设置向导里设置口令（启动后 ${config.setupWindowMinutes} 分钟内有效，0 = 不限）",
+        )
+    } else {
+        PikoLog.i(
+            TAG,
+            "访问控制：已启用；口令来源=${if (access.control.managedExternally) "启动参数或环境变量（页面不可改）" else "数据目录 access-token 文件"}；" +
+                "指纹 sha256[:8]=${access.control.fingerprint}",
+        )
     }
-    PikoLog.i(
-        TAG,
-        "访问控制：已启用；口令来源=${if (access.control.managedExternally) "启动参数或环境变量（页面不可改）" else "数据目录 access-token 文件"}；" +
-            "指纹 sha256[:8]=${access.control.fingerprint}",
-    )
 
     runCatching { Files.createDirectories(config.activeDownloadDir) }
         .onFailure {
@@ -87,11 +91,12 @@ fun main(args: Array<String>) {
             " (home=${config.home}, download=${config.activeDownloadDir})",
     )
     embeddedServer(CIO, port = config.port, host = config.host) {
-        installServer(graph, access.control)
+        installServer(graph, access)
     }.start(wait = true)
 }
 
-fun Application.installServer(graph: ServiceGraph, access: AccessControl) {
+fun Application.installServer(graph: ServiceGraph, setup: AccessSetup) {
+    val access = setup.control
     install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; encodeDefaults = true }) }
     // 所有 /api 前缀的请求在路由之前统一校验会话，静态页与资源不受影响
     install(accessGuard(access))
@@ -112,6 +117,7 @@ fun Application.installServer(graph: ServiceGraph, access: AccessControl) {
             )
         }
         accessRoutes(access)
+        setupRoutes(access, setup)
         settingsRoutes(graph.config, access, graph)
         authRoutes(graph)
         driveRoutes(graph)

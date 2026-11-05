@@ -15,7 +15,8 @@
       </el-button>
     </header>
     <main class="main">
-      <GateView v-if="state.accessOk !== true" />
+      <SetupView v-if="state.setup.needsSetup === true" />
+      <GateView v-else-if="state.accessOk !== true" />
       <router-view v-else />
     </main>
   </div>
@@ -25,7 +26,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GateView from './views/GateView.vue'
-import { refreshAccess, refreshHealth, state } from './store'
+import SetupView from './views/SetupView.vue'
+import { refreshAccess, refreshHealth, refreshSetup, state } from './store'
 
 const route = useRoute()
 const router = useRouter()
@@ -53,7 +55,8 @@ onMounted(async () => {
   const saved = localStorage.getItem('piko-theme')
   applyTheme(saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches)
   await refreshHealth()
-  await refreshAccess()
+  await refreshSetup()
+  if (state.setup.needsSetup !== true) await refreshAccess()
   healthTimer = setInterval(refreshHealth, 10000)
 })
 

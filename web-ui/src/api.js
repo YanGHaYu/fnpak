@@ -1,10 +1,15 @@
 // 统一请求封装：同源 Cookie 会话；后端错误结构固定为 {"error":{"code","message"}}。
 // 口令失效（401 access_denied）在一处收敛到口令卡，避免每个调用点各写一遍。
 let accessLostHandler = () => {}
+let setupRequiredHandler = () => {}
 let errorLogger = () => {}
 
 export function setAccessLostHandler(handler) {
   accessLostHandler = handler
+}
+
+export function setSetupRequiredHandler(handler) {
+  setupRequiredHandler = handler
 }
 
 export function setErrorLogger(handler) {
@@ -28,7 +33,9 @@ export async function api(path, options = {}) {
       }
     }
   }
-  if (response.status === 401 && data?.error?.code === 'access_denied') {
+  if (response.status === 401 && data?.error?.code === 'setup_required') {
+    setupRequiredHandler('需要先设置访问口令')
+  } else if (response.status === 401 && data?.error?.code === 'access_denied') {
     accessLostHandler('访问口令已失效，请重新输入')
   } else if (!response.ok) {
     // 故障排查入口靠这份前端侧的最近错误，口令卡之外的失败都记一条
