@@ -30,15 +30,14 @@ jobs:
       - name: Set up Gradle (with cache)
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 让 Gradle 只使用 CI 安装的 JDK
-        run: |
-          mkdir -p "${GRADLE_USER_HOME:-$HOME/.gradle}"
-          echo "org.gradle.java.installations.paths=$JAVA_HOME" >> "${GRADLE_USER_HOME:-$HOME/.gradle}/gradle.properties"
-
       - name: Build server distribution
+        # 不再写机器级 ~/.gradle/gradle.properties：用 fpkOnly 只评估 :shared/:server（不需要 JDK 25），
+        # 并关闭 toolchain 自动下载，缺 JDK 21 时直接失败而不是走 foojay 解析
         run: |
-          chmod +x gradlew scripts/*.sh
-          ./gradlew :server:installDist --configure-on-demand --no-daemon --stacktrace
+          chmod +x gradlew scripts/*.sh build-nodev.sh
+          ./gradlew :server:installDist --configure-on-demand --no-daemon --stacktrace \
+            -Pfnpak.fpkOnly=true \
+            -Porg.gradle.java.installations.auto-download=false
 
       - name: Read app metadata from manifest
         id: meta
@@ -63,6 +62,8 @@ jobs:
       - name: Build fpk
         env:
           FNPACK: /tmp/fnpack
+          # installDist 已在上一步完成，避免重复跑 Gradle
+          SKIP_INSTALL_DIST: '1'
         run: ./scripts/build-fpk.sh
 
       - name: Verify fpk (0755 + GLIBC <= 2.36)
