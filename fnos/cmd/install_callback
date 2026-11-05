@@ -1,0 +1,8 @@
+#!/bin/sh
+# 安装后：准备运行时目录（数据、日志、默认下载目录）。
+set -eu
+VAR_DIR="${TRIM_PKGVAR:?}"
+mkdir -p "${VAR_DIR}/logs" || exit 1
+DOWNLOAD_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+[ -n "$DOWNLOAD_DIR" ] && mkdir -p "$DOWNLOAD_DIR" || true
+exit 0

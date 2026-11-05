@@ -1,0 +1,5 @@
+#!/bin/sh
+# 配置变更后：重启服务让新配置生效。
+set -eu
+"$(dirname "$0")/main" stop || true
+"$(dirname "$0")/main" start

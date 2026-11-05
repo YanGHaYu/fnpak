@@ -1,0 +1,100 @@
+#!/bin/sh
+# fnOS fpk 生命周期入口：start / stop / status。
+# status 返回 0=运行中、3=未运行（应用中心据此显示状态）。
+#
+# FNPak：启动器名与日志名由 appname 推导（${APPNAME}-server），改名不用改本脚本。
+#
+# 口令不再由本脚本生成或注入：服务端自己是唯一写入方——首次启动生成随机口令并写入
+# $TRIM_PKGVAR/access-token（0600），之后只读该文件；页面改口令也写回这一份。
+# 这样不存在「脚本一份、进程一份」的双写者，也不会出现文件与进程取值不同步。
+set -eu
+
+PORT="${TRIM_SERVICE_PORT:-18080}"
+VAR_DIR="${TRIM_PKGVAR:?TRIM_PKGVAR 未设置}"
+APPDEST="${TRIM_APPDEST:?TRIM_APPDEST 未设置}"
+PID_FILE="${VAR_DIR}/app.pid"
+LOG_DIR="${VAR_DIR}/logs"
+# appname 从运行时目录反推（/var/apps/<appname>/var），不把产品名写死在生命周期脚本里
+APPNAME="${TRIM_APPNAME:-$(basename "$(dirname "$VAR_DIR")")}"
+LOG_FILE="${LOG_DIR}/${APPNAME}-server.log"
+# jpackage app-image 的启动器：lib/runtime 是随包的 JDK，不依赖系统 java
+LAUNCHER="${APPDEST}/bin/${APPNAME}-server"
+
+# 下载目录完全由服务端决定（settings.json > 第一个可写的授权目录/downloads > $TRIM_PKGVAR/downloads）。
+# 这里不再挑「第一个 share」：TRIM_DATA_SHARE_PATHS 可能为空，管理员也可能在应用设置里
+# 额外授权目录（TRIM_DATA_ACCESSIBLE_PATHS / 授权接口），由服务端统一解析更可靠。
+
+fail() {
+    printf '%s\n' "$*" > "${TRIM_TEMP_LOGFILE:-/dev/stderr}"
+    exit 1
+}
+
+is_running() {
+    [ -f "$PID_FILE" ] || return 1
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+case "${1:-}" in
+start)
+    if is_running; then
+        exit 0
+    fi
+    [ -x "$LAUNCHER" ] || fail "启动失败：$LAUNCHER 不存在或不可执行"
+    mkdir -p "$LOG_DIR" || fail "无法创建日志目录 $LOG_DIR"
+
+    # 访问口令：服务端读/写 $TRIM_PKGVAR/access-token；这里只确保父目录存在
+    [ -f "$VAR_DIR/access-token" ] || mkdir -p "$VAR_DIR"
+
+    # -D 通过 JAVA_TOOL_OPTIONS 传给随包 runtime 的 JVM（jpackage 启动器不吃命令行 JVM 参数）；
+    # TRIM_DATA_SHARE_PATHS / TRIM_DATA_ACCESSIBLE_PATHS / TRIM_API_TOKEN 原样保留给服务端
+    # LANG=C.UTF-8：容器/精简系统常见 POSIX locale，缺它中文日志会被写成 "?????"
+    JAVA_TOOL_OPTIONS="-Dfnpak.home=${VAR_DIR} -Djava.awt.headless=true" \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+        nohup "$LAUNCHER" --port "$PORT" --host 0.0.0.0 >>"$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+
+    # 给进程 3 秒起来，避免应用中心立刻判死。
+    i=0
+    while [ "$i" -lt 3 ]; do
+        if is_running; then
+            exit 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    rm -f "$PID_FILE"
+    fail "启动失败：3 秒内进程退出，见 $LOG_FILE"
+    ;;
+stop)
+    if ! is_running; then
+        rm -f "$PID_FILE"
+        exit 0
+    fi
+    pid="$(cat "$PID_FILE")"
+    kill "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 10 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$PID_FILE"
+            exit 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    exit 0
+    ;;
+status)
+    if is_running; then
+        exit 0
+    fi
+    exit 3
+    ;;
+*)
+    fail "用法：main start|stop|status"
+    ;;
+esac

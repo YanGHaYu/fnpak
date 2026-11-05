@@ -1,0 +1,34 @@
+appname=fnpak
+version=0.7.0
+display_name=FNPak
+desc=PikPak 第三方 NAS 客户端 · 非官方：Web UI 浏览云盘、磁力/分享入库、离线任务与下载。
+source=thirdparty
+platform=x86
+
+maintainer=YanGHaYu
+maintainer_url=https://github.com/YanGHaYu/fnpak
+distributor=YanGHaYu
+distributor_url=https://github.com/YanGHaYu/fnpak
+
+os_min_version=1.2.0
+
+service_port=18080
+checkport=true
+ctl_stop=true
+
+desktop_uidir=ui
+desktop_applaunchname=fnpak.main
+
+disable_authorization_path=false
+
+changelog=0.7.0: 更名为 FNPak（PikPak 第三方 NAS 客户端 · 非官方）：appname 由 piko 改为 fnpak，安装目录变为 /var/apps/fnpak，可执行/构件名改为 fnpak-server，桌面入口 key 改为 fnpak.main；内部 Kotlin 包名 dev.piko.* 沿用上游以降低同步冲突；服务端日志前缀、Cookie、媒体头与前端标题同步更名；旧用户迁移见 README（复制 var 下的 access-token/settings.json/download-tasks.json，或重新设置口令与下载位置）。
+0.6.2: 退出登录从目录页头移到设置页账号区块（文案「退出登录」，说明会清除本机登录态、云端文件不受影响）；回收站改为首页第四个平行 Tab（目录 / 本机下载 / 离线任务 / 回收站），/trash 深链仍可直接打开且刷新后停在回收站，Tab 可显示回收站条数（拿不到总数时不显示）；修复批量下载展开子项看不全：SSE 下载进度事件补齐 fileId/parentTaskId/groupId，前端改为按 id 合并而非整对象替换，子项始终以 GET /api/downloads 全量为准，并加展开时兜底刷新；子项列表显示「共 N 项，显示 M 项」，桌面与移动端均在滚动区内可完整浏览数百项，每条带状态徽标与百分比。
+0.6.1: 版式修正：行内「⋯」改为表格独立最后一列（移动端卡片固定在右上角，不占名称行），三个 Tab 与回收站统一；多选操作条去掉重命名（多选不提供重命名），移动端常见操作常驻一行、移动到/复制到收进「更多」；选中数量与大小文案独占一行，按钮另起一行，移动端按钮仍为 44px 高且不折行、不溢出视口。
+0.6.0: 新增回收站页面（/trash）：列出名称/类型/原位置/大小/删除时间，支持恢复与彻底删除（彻底删除为 SDK batchDelete，永久不可恢复，执行前二次确认并写出目标名）；全站行内操作收敛为单个「⋯」图标：桌面悬浮弹出带图标+文案的菜单，移动端点击弹出、44px 触控目标；行内操作永远只作用于当前行，批量操作只留在底部操作条；删除类确认框均写出目标名称。
+0.5.0: 云端文件/文件夹支持重命名、批量移动、批量复制：重命名单输入框预填原名并实时校验（非空、≤255、不含 / 与 \）；移动/复制弹窗内目录树懒加载，禁止选中自身或子目录（服务端 invalid_target），逐条返回成功/失败原因；复制由 PikPak 服务端按任务异步执行，返回任务 ID 并可查询进度，源文件保留。移动端卡片与桌面表格均有入口，移动端操作条保持贴底可换行。
+0.4.3: 窄屏（≤768px）轻量响应式：目录 / 本机下载 / 离线任务三张表降级为卡片列表，行内操作与勾选不再需要横向滚动；勾选框与按钮触控目标 ≥44px；底部操作条贴底、自动换行、文字不再竖排；播放器弹窗限制 90vh；设置页按钮同步放大。纯 CSS 断点，桌面端外观与行为不变。
+0.4.2: 同一目录内文件与文件夹可混合多选，一次「下载」合并成同一个批次（父任务）：文件夹服务端递归展开、文件直接入队，进度按总字节聚合；扫描期返回 SCANNING 与已发现文件数，文件夹大小显示「待扫描」；多文件夹各自成树落盘，不互相混层；行内「下载文件夹」保留但不再是唯一入口。
+0.4.1: 首次启动不再自动生成口令：全新数据目录进入「设置访问口令」向导（首次设置窗口默认 15 分钟，--setup-window-minutes 可调，0=不限）；已有 token 文件的老用户与外部注入 PIKO_SERVER_TOKEN 完全不受影响；`GET /api/setup/state` 免口令返回 needsSetup/reason；口令 0600 原子写盘，日志只记来源 IP 与指纹前 8 位。
+0.4.0: 目录多选下载与整个文件夹递归下载（同一父任务、扫描期进度、子项嵌套落盘、取消保留已下文件）；离线任务显示名称/类型/文件夹子项数并支持多选删除；首页改为「目录 / 本机下载 / 离线任务」三个 Tab（切换保留状态）；终态下载任务只保留「删除任务」，云端多选删除为移入回收站。
+0.3.0: 分段并发下载（默认 8 段，可配 1-32，全局连接预算）+ 本地分段断点续传；前端重构为 Vue 3 + Element Plus（自包含离线，无 CDN），设置项拆到独立 /settings 子页面。
+0.2.2: 支持「应用设置→访问权限」里运行期授权的任意文件夹作为下载位置（TRIM_DATA_ACCESSIBLE_PATHS + trim.file.getSharedAccessibleFolders 实时查询）；授权列表在设置页带来源与可写性；无可用目录时回落到数据目录 downloads 并 WARN。

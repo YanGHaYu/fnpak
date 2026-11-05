@@ -1,0 +1,5 @@
+#!/bin/sh
+# 卸载前：停止服务。
+set -eu
+"$(dirname "$0")/main" stop || true
+exit 0

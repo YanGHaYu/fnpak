@@ -1,0 +1,5 @@
+#!/bin/sh
+# 升级前：先停掉服务，避免二进制替换时文件被占用。
+set -eu
+"$(dirname "$0")/main" stop || true
+exit 0

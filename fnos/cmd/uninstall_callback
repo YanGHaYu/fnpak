@@ -1,0 +1,5 @@
+#!/bin/sh
+# 卸载后：清理残留 PID 文件；TRIM_PKGVAR 由系统回收。
+set -eu
+rm -f "${TRIM_PKGVAR:?}/app.pid" || true
+exit 0

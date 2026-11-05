@@ -1,0 +1,15 @@
+{
+  "api-scope": [
+    "trim.file.sharedAccess"
+  ],
+  "data-share": {
+    "shares": [
+      {
+        "name": "fnpak",
+        "permission": {
+          "rw": ["fnpak"]
+        }
+      }
+    ]
+  }
+}

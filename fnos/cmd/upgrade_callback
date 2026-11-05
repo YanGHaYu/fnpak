@@ -1,0 +1,4 @@
+#!/bin/sh
+# 升级后：数据都在 TRIM_PKGVAR，直接重启服务。
+set -eu
+"$(dirname "$0")/main" start
