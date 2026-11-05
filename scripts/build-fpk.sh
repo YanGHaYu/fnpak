@@ -34,7 +34,7 @@ DIST_DIR="$ROOT/server/build/install/${APPNAME}-server"
 [ -f "$DIST_DIR/lib/server.jar" ] || fail "installDist 里找不到 server.jar"
 
 rm -rf "$WORK"
-mkdir -p "$WORK/runtime" "$WORK/image" "$WORK/stage"
+mkdir -p "$WORK/image" "$WORK/stage"
 
 echo "== jlink =="
 "$JDK/bin/jlink" \
