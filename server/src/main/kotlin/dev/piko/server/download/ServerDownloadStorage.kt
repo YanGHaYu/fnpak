@@ -54,4 +54,7 @@ class ServerDownloadStorage(
         val root = directory.resolve(folder)
         if (root.isDirectory) root.walkBottomUp().filter { it.isDirectory }.forEach { it.delete() }
     }
+
+    /** 下载根目录；用于「删除任务记录」提示里告诉用户文件保留在哪。 */
+    fun rootPath(): String = directory.absolutePath
 }

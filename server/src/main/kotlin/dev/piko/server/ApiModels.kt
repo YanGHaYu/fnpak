@@ -189,6 +189,23 @@ data class AccessLoginRequest(val passcode: String = "")
 @Serializable
 data class AccessStateResponse(val required: Boolean, val authenticated: Boolean)
 
+/** 首次设置向导状态。`needsSetup=true` 时前端显示向导而不是口令卡。 */
+@Serializable
+data class SetupStateResponse(
+    val needsSetup: Boolean,
+    /** `no_token_file` / `token_file` / `managed_externally`。 */
+    val reason: String,
+    /** 是否仍在允许设置的时间窗口内（服务启动后的 N 分钟；0 = 不限）。 */
+    val setupWindowOpen: Boolean,
+    val setupWindowMinutes: Int,
+)
+
+@Serializable
+data class SetupAccessTokenRequest(val passcode: String = "", val confirmPasscode: String = "")
+
+@Serializable
+data class SetupAccessTokenResponse(val ok: Boolean, val fingerprint: String, val needsSetup: Boolean = false)
+
 // ---- M2 链接解析与离线任务 ----
 
 @Serializable
@@ -237,10 +254,35 @@ data class OfflineTaskItem(
     val fileSize: Long = 0,
     val message: String = "",
     val sourceUrl: String = "",
+    /** 显示名：按 file_name → 文件详情 → display_name → 磁力 dn → MAGNET+hash 的优先级解析。 */
+    val name: String = "",
+    /** 名字取自哪里：file_name / file_detail / display_name / magnet_dn / fallback。 */
+    val nameSource: String = "fallback",
+    /** file / folder / unknown。 */
+    val type: String = "unknown",
+    /** 文件夹型任务的第一页子项数；非文件夹为 0。 */
+    val folderChildCount: Int = 0,
+    /** 子项超过一页，只统计到第一页；页面标注「至少」。 */
+    val folderChildCountTruncated: Boolean = false,
 )
 
 @Serializable
 data class OfflineTaskListResponse(val items: List<OfflineTaskItem>, val nextPageToken: String = "")
+
+@Serializable
+data class TaskDeleteRequest(val ids: List<String> = emptyList())
+
+@Serializable
+data class TaskDeleteFailure(val id: String, val message: String)
+
+/** 删除结果如实回包：成功哪些、失败哪些；不把整批当成功。 */
+@Serializable
+data class TaskDeleteResponse(
+    val deleted: List<String> = emptyList(),
+    val failed: List<TaskDeleteFailure> = emptyList(),
+    /** 固定说明：删除任务记录不删云端产出文件（SDK `deleteFiles=false`）。 */
+    val note: String = "仅删除离线任务记录；云端已完成的文件会保留",
+)
 
 // ---- 浏览器播放 ----
 
@@ -274,13 +316,108 @@ data class DownloadItem(
     val status: String,
     val error: String? = null,
     val path: String = "",
+    /** 父任务（批次）真实 ID；单文件为空串。 */
+    val parentTaskId: String = "",
+    /** 前端展开子项用的分组 ID：批次 ID，单文件为 `single:<taskId>`。 */
+    val groupId: String = "",
+    /** 文件夹下载的源文件夹 ID。 */
+    val rootFolderId: String = "",
+    val batchName: String = "",
+    val batchIsFolder: Boolean = false,
+)
+
+/** 父任务汇总：一个文件夹或一次多选下载合并成一行，进度按总字节汇总。 */
+@Serializable
+data class DownloadGroupItem(
+    val id: String,
+    /** folder / files / single。 */
+    val kind: String,
+    val name: String,
+    val rootFolderId: String = "",
+    /** SCANNING / QUEUED / DOWNLOADING / PAUSED / COMPLETED / FAILED / CANCELLED。 */
+    val status: String,
+    val childCount: Int = 0,
+    val completedCount: Int = 0,
+    val bytesTotal: Long = 0,
+    val bytesDone: Long = 0,
+    val percent: Double = 0.0,
+    val speedBytesPerSec: Long = 0,
+    val error: String? = null,
+    val createdAtMs: Long = 0,
+    /** 文件（或文件夹）在本机的落盘目录，删除任务记录时用来提示文件保留在哪。 */
+    val path: String = "",
 )
 
 @Serializable
-data class DownloadListResponse(val items: List<DownloadItem>)
+data class DownloadListResponse(
+    val items: List<DownloadItem>,
+    val groups: List<DownloadGroupItem> = emptyList(),
+)
 
 @Serializable
 data class StartDownloadRequest(val fileId: String = "")
+
+@Serializable
+data class BatchDownloadRequest(val fileIds: List<String> = emptyList())
+
+@Serializable
+data class SkippedFile(val id: String, val reason: String)
+
+@Serializable
+data class BatchDownloadResponse(
+    val groupId: String = "",
+    val childCount: Int = 0,
+    val bytesTotal: Long = 0,
+    val skipped: List<SkippedFile> = emptyList(),
+)
+
+@Serializable
+data class FolderDownloadRequest(val folderId: String = "")
+
+@Serializable
+data class FolderDownloadResponse(
+    val groupId: String,
+    val phase: String = "SCANNING",
+    val childCount: Int = 0,
+    val bytesTotal: Long = 0,
+)
+
+@Serializable
+data class TaskRemovedEvent(val id: String)
+
+/** 删除本机下载任务**记录**（不删磁盘文件）。 */
+@Serializable
+data class DownloadRecordDeleteRequest(val ids: List<String> = emptyList())
+
+@Serializable
+data class DownloadRecordDeleteFailure(val id: String, val message: String)
+
+@Serializable
+data class DownloadRecordDeleteResponse(
+    val deleted: List<String> = emptyList(),
+    val failed: List<DownloadRecordDeleteFailure> = emptyList(),
+    val removedTasks: Int = 0,
+    /** 固定说明：只删记录，不动磁盘文件。 */
+    val note: String = "只删除任务记录与进度；磁盘上已下载的文件保留",
+)
+
+@Serializable
+data class DownloadGroupRemovedEvent(val id: String)
+
+/** 云端批量删除。使用 SDK 的 batchTrash：移入回收站，可恢复，不是永久删除。 */
+@Serializable
+data class CloudDeleteRequest(val ids: List<String> = emptyList())
+
+@Serializable
+data class CloudDeleteFailure(val id: String, val message: String)
+
+@Serializable
+data class CloudDeleteResponse(
+    val trashed: List<String> = emptyList(),
+    val failed: List<CloudDeleteFailure> = emptyList(),
+    val mode: String = "trash",
+    val note: String = "已移入回收站，可在回收站恢复；不是永久删除",
+)
 
 // ---- SSE 事件 ----
 

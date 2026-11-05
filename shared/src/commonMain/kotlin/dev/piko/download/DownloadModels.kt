@@ -84,6 +84,10 @@ data class DownloadTask(
     val completedRanges: List<DownloadedSpan> = emptyList(),
     /** 各分段的实时进度，只在分段下载进行中有值；不落盘。 */
     val segments: List<DownloadSegmentInfo>? = null,
+    /** 父任务（批次）ID。多选文件或整个文件夹下载的子项共享它；单独下载为空串。 */
+    val parentTaskId: String = "",
+    /** 文件夹下载的源文件夹 ID。多选文件批次与单独下载为空串。 */
+    val rootFolderId: String = "",
 ) {
     val progress: Float
         get() = progressFraction?.coerceIn(0f, 1f)

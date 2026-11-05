@@ -4,9 +4,11 @@ import dev.piko.server.auth.CaptchaChallengeStore
 import dev.piko.server.auth.LoginAttemptLimiter
 import dev.piko.server.auth.PikPakCaptchaClient
 import dev.piko.server.download.ConnectionBudget
+import dev.piko.server.download.DownloadGroupRegistry
 import dev.piko.server.download.DownloadTuning
 import dev.piko.server.download.SegmentDownloader
 import dev.piko.server.download.ServerDownloadStorage
+import dev.piko.server.download.ServerFolderSource
 import dev.piko.server.download.ServerPreferences
 import dev.piko.server.settings.ServerSettings
 import dev.piko.server.settings.ServerSettingsFile
@@ -24,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -68,6 +71,9 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     val instantRepository: InstantMagnetRepository = InstantMagnetRepository(clientManager)
 
     val taskRepository: TaskRepository = TaskRepository(clientManager, driveRepository, instantRepository)
+
+    /** 离线任务名字解析：详情按 fileId 缓存，并发上限 4。 */
+    val taskNameResolver = dev.piko.server.tasks.TaskNameResolver(driveRepository)
 
     private val preferences = ServerPreferences(config.home) { config.activeDownloadDir }
 
@@ -114,7 +120,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         tuning = downloadTuning,
     )
 
-    private val downloadStorage = ServerDownloadStorage(
+    val downloadStorage = ServerDownloadStorage(
         cacheDirectory = config.home.resolve("download-cache").toFile(),
         directoryProvider = { config.activeDownloadDir.toFile() },
     )
@@ -127,6 +133,19 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         cacheStore = cacheStore,
         directDownloader = directDownloader,
     )
+
+    /** 文件夹递归来源：服务端不按今日额度拦截，扫完直接入队。 */
+    val serverFolderSource = ServerFolderSource(driveRepository)
+
+    /** 父任务「取消」标记（与暂停区分），落盘在数据目录，重启后仍显示 CANCELLED。 */
+    val downloadGroupRegistry = DownloadGroupRegistry(config.home)
+
+    /** 离线任务被删除后推给 SSE，前端据此移除行，不必重拉整页。 */
+    val taskRemovalEvents = MutableSharedFlow<String>(extraBufferCapacity = 64)
+
+    init {
+        downloadCoordinator.bindDefaultFolderSource(serverFolderSource)
+    }
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()
 

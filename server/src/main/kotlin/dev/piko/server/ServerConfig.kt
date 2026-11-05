@@ -9,8 +9,9 @@ import java.nio.file.Path
  *
  * - 端口：`--port` / `--port=18080` > `PORT` > [DEFAULT_PORT]
  * - 监听地址：`--host` > [DEFAULT_HOST]
- * - 访问口令：`--access-token` > `PIKO_SERVER_TOKEN` > 数据目录的 `access-token` 文件 > 首次启动随机生成并落盘。
+ * - 访问口令：`--access-token` > `PIKO_SERVER_TOKEN` > 数据目录的 `access-token` 文件 > 无口令状态（首次设置向导）。
  *   前两者算「外部托管」（[accessTokenManagedExternally]），此时页面不允许改口令。
+ * - 首次设置窗口：`--setup-window-minutes`（默认 15，0 = 不限），超时后只允许命令行重置。
  * - 数据根目录：系统属性 `piko.home`，由 fpk 的 cmd/main 注入 `$TRIM_PKGVAR`；未给时退回 `~/.piko`
  * - 下载目录：`<home>/settings.json` 里的 `downloadDir`（存在且目录还在）> `TRIM_DATA_SHARE_PATHS` 第一项 + `/downloads`
  *   > `-Dpiko.downloadDir` > 系统临时目录下的 `piko-downloads`
@@ -28,6 +29,8 @@ data class ServerConfig(
     val accessToken: String?,
     /** 口令来自启动参数/环境变量时为真：页面改口令会被 409 拒绝。 */
     val accessTokenManagedExternally: Boolean,
+    /** 首次设置口令窗口（分钟）；0 表示不限。默认 15，可用 `--setup-window-minutes` 调整。 */
+    val setupWindowMinutes: Int,
     /** 允许写入的共享根：`config/resource` 声明的（TRIM_DATA_SHARE_PATHS）+ 管理员授权的（TRIM_DATA_ACCESSIBLE_PATHS）。 */
     val shares: List<Path>,
     /** 仅 `config/resource` 声明的共享根（安装时由系统创建）。 */
@@ -51,13 +54,14 @@ data class ServerConfig(
     companion object {
         const val DEFAULT_PORT = 18080
         const val DEFAULT_HOST = "127.0.0.1"
-        const val VERSION = "0.3.0"
+        const val VERSION = "0.4.0"
 
         fun from(args: Array<String>): ServerConfig {
             var host = DEFAULT_HOST
             var port = envPort() ?: DEFAULT_PORT
             var token = System.getenv("PIKO_SERVER_TOKEN")?.trim()?.takeIf { it.isNotEmpty() }
             var external = token != null
+            var setupWindowMinutes = 15
             var index = 0
             while (index < args.size) {
                 val arg = args[index]
@@ -85,13 +89,22 @@ data class ServerConfig(
                             ?: throw IllegalArgumentException("--access-token 需要一个非空口令")
                         external = true
                     }
+                    arg == "--setup-window-minutes" -> {
+                        index++
+                        setupWindowMinutes = args.getOrNull(index)?.toIntOrNull()
+                            ?: throw IllegalArgumentException("--setup-window-minutes 需要一个整数（分钟，0 = 不限）")
+                    }
+                    arg.startsWith("--setup-window-minutes=") -> setupWindowMinutes =
+                        arg.substringAfter('=').toIntOrNull()
+                            ?: throw IllegalArgumentException("--setup-window-minutes 需要一个整数（分钟，0 = 不限）")
                 }
                 index++
             }
             require(port in 1..65535) { "端口超出范围：$port" }
+            require(setupWindowMinutes >= 0) { "--setup-window-minutes 不能为负数：$setupWindowMinutes" }
 
-            // 不再因为「非回环 + 没给口令」而拒绝启动：口令缺失时由 AccessControl 生成一份随机口令
-            // 并落盘（0600），用户 cat 文件即可。这样 fpk 里不需要再有一个「外部注入口令」的脚本角色。
+            // 不再因为「非回环 + 没给口令」而拒绝启动：口令缺失时进入首次设置向导（无口令状态），
+            // 不会静默生成文件。这样 fpk 里不需要再有一个「外部注入口令」的脚本角色。
             val home = System.getProperty("piko.home")?.takeIf { it.isNotBlank() }?.let(Path::of)
                 ?: Path.of(System.getProperty("user.home"), ".piko")
             val normalizedHome = home.toAbsolutePath().normalize()
@@ -105,6 +118,7 @@ data class ServerConfig(
                 downloadDir = resolveDownloadDir(normalizedHome, shares),
                 accessToken = token,
                 accessTokenManagedExternally = external,
+                setupWindowMinutes = setupWindowMinutes,
                 shares = shares,
                 declaredShares = declared,
                 authorizedShares = authorized,

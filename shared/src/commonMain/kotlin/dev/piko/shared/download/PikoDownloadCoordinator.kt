@@ -375,8 +375,8 @@ class PikoDownloadCoordinator(
      * 多选文件一次入队，共用全局并发上限；重复文件复用已有任务。视频按画质上限 [maxHeight] 挑档（0 是原画，
      * null 取设置里的默认下载画质，没设过取原画），开始下载时才挑，见 [DownloadTask.qualityCap]。
      */
-    fun enqueueFiles(files: List<FileStat>, maxHeight: Int? = null) {
-        enqueueFiles(files, leasedSource = false, maxHeight = maxHeight)
+    fun enqueueFiles(files: List<FileStat>, maxHeight: Int? = null, batchId: String? = null) {
+        enqueueFiles(files, leasedSource = false, maxHeight = maxHeight, batchId = batchId)
     }
 
     /**
@@ -397,7 +397,13 @@ class PikoDownloadCoordinator(
     }
 
     /** [chosen] 为 null 时按上限 [maxHeight] 挑档，它也为 null 时取设置里的下载画质。 */
-    private fun enqueueFiles(files: List<FileStat>, leasedSource: Boolean, chosen: DownloadQuality? = null, maxHeight: Int? = null) {
+    private fun enqueueFiles(
+        files: List<FileStat>,
+        leasedSource: Boolean,
+        chosen: DownloadQuality? = null,
+        maxHeight: Int? = null,
+        batchId: String? = null,
+    ) {
         val account = currentAccount()
         val accepted = files.filter { !it.isFolder && !it.isUploading }.distinctBy { it.id }
         if (accepted.isEmpty()) return
@@ -406,7 +412,9 @@ class PikoDownloadCoordinator(
             enqueueLock.withLock {
                 val now = Clock.System.now().toEpochMilliseconds()
                 val cap = if (chosen == null && !leasedSource) maxHeight ?: defaultMaxHeight() else 0
-                val batch = if (accepted.size > 1) DownloadBatch("files@$now-${++batchSequence}", tr("批量下载", "Batch download", "一括ダウンロード", "일괄 다운로드", "批次下載"), isFolder = false) else null
+                val batch = if (accepted.size > 1) {
+                    DownloadBatch(batchId ?: "files@$now-${++batchSequence}", tr("批量下载", "Batch download", "一括ダウンロード", "일괄 다운로드", "批次下載"), isFolder = false)
+                } else null
                 val taken = _tasks.value.values.mapTo(mutableSetOf()) { it.fileName.lowercase() }
                 val reused = accepted.count { existingTask(it, account, chosen) != null }
                 val added = accepted.map { file ->
@@ -429,6 +437,7 @@ class PikoDownloadCoordinator(
                             status = if (complete) DownloadStatus.COMPLETED else DownloadStatus.PENDING,
                             fullFileSize = file.sizeBytes, thumbnailLink = file.thumbnailLink, parentId = file.parentId,
                             createdAtMs = now, account = account, batch = batch, leasedSource = leasedSource,
+                            parentTaskId = batch?.id.orEmpty(),
                             qualityCap = if (complete || leasedSource) 0 else qualityCapFor(file, name, cap),
                         )
                     }
@@ -589,6 +598,8 @@ class PikoDownloadCoordinator(
             createdAtMs = listing.createdAtMs,
             account = listing.account,
             batch = listing.batch,
+            parentTaskId = listing.batch.id,
+            rootFolderId = listing.batch.sourceFolderId.orEmpty(),
             qualityCap = if (complete) 0 else qualityCapFor(file, planned.path, cap),
         )
     }
@@ -1159,6 +1170,20 @@ class PikoDownloadCoordinator(
                 storage.delete(storage.downloadTarget(task.fileName))
             }
         }
+    }
+
+    /**
+     * 只删任务记录与进度，**不动磁盘上的文件**。进行中的任务先停协程，
+     * 已写入的分块/临时文件原样保留（与 `cancelBatch` 的「连文件一起删」明确区分）。
+     */
+    fun removeTaskRecords(taskIds: Collection<String>): List<String> {
+        val existing = taskIds.distinct().filter { _tasks.value.containsKey(it) }
+        if (existing.isEmpty()) return emptyList()
+        existing.forEach { id -> jobs.value[id]?.cancel() }
+        _tasks.update { tasks -> tasks - existing.toSet() }
+        scope.launch { flushPersistence() }
+        PikoLog.i(TAG, "删除任务记录：${existing.size} 个，磁盘文件保留")
+        return existing
     }
 
     /**

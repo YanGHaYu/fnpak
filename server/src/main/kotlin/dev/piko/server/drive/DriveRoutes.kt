@@ -1,5 +1,8 @@
 package dev.piko.server.drive
 
+import dev.piko.server.CloudDeleteFailure
+import dev.piko.server.CloudDeleteRequest
+import dev.piko.server.CloudDeleteResponse
 import dev.piko.server.FileDetailResponse
 import dev.piko.server.FileItem
 import dev.piko.server.FileListResponse
@@ -9,9 +12,11 @@ import dev.piko.shared.data.PikoFileSortOrder
 import io.github.nihildigit.pikpak.FileDetail
 import io.github.nihildigit.pikpak.FileStat
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
+import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 
 /**
@@ -56,6 +61,29 @@ fun Route.driveRoutes(graph: ServiceGraph) {
                 onSuccess = { call.respond(it.toResponse()) },
                 onFailure = { call.respondError(HttpStatusCode.BadGateway, "file_detail_failed", failureMessage(it)) },
             )
+        }
+
+        /**
+         * 批量删除云端文件/文件夹：走 `PikoDriveRepository.trash` → SDK `batchTrash`，
+         * 语义是**移入回收站**，可在回收站恢复，不是永久删除（永久删除是 `batchDelete`，这里不提供）。
+         * 逐项调用并逐项返回，失败项前端保留选中以便重试。
+         */
+        post("/trash") {
+            if (graph.requireLogin(call)) return@post
+            val ids = runCatching { call.receive<CloudDeleteRequest>() }.getOrNull()
+                ?.ids?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinct().orEmpty()
+            if (ids.isEmpty()) {
+                return@post call.respondError(HttpStatusCode.BadRequest, "missing_ids", "ids 不能为空")
+            }
+            val trashed = mutableListOf<String>()
+            val failed = mutableListOf<CloudDeleteFailure>()
+            for (id in ids) {
+                graph.driveRepository.trash(listOf(id)).fold(
+                    onSuccess = { trashed += id },
+                    onFailure = { failed += CloudDeleteFailure(id, failureMessage(it)) },
+                )
+            }
+            call.respond(CloudDeleteResponse(trashed = trashed, failed = failed))
         }
     }
 }

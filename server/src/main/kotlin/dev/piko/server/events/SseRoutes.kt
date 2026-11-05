@@ -1,8 +1,11 @@
 package dev.piko.server.events
 
+import dev.piko.server.DownloadGroupRemovedEvent
 import dev.piko.server.DownloadProgressEvent
 import dev.piko.server.ServiceGraph
 import dev.piko.server.TaskProgressEvent
+import dev.piko.server.TaskRemovedEvent
+import dev.piko.server.download.downloadGroups
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respondTextWriter
@@ -13,6 +16,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -37,6 +41,8 @@ fun Route.sseRoutes(graph: ServiceGraph) {
             coroutineScope {
                 val events = Channel<String>(Channel.UNLIMITED)
                 launch { streamDownloads(graph, events) }
+                launch { streamGroups(graph, events) }
+                launch { streamTaskRemovals(graph, events) }
                 launch { streamTasks(graph, events) }
                 launch {
                     while (true) {
@@ -73,6 +79,36 @@ private suspend fun streamDownloads(graph: ServiceGraph, out: SendChannel<String
             )
             out.send("event: download.progress\ndata: ${json.encodeToString(event)}\n\n")
         }
+    }
+}
+
+/** 父任务汇总：扫描期与下载期都按同一个批次 ID 推送，前端把一行进度条合并显示。 */
+private suspend fun streamGroups(graph: ServiceGraph, out: SendChannel<String>) {
+    val sent = mutableMapOf<String, String>()
+    combine(graph.downloadCoordinator.tasks, graph.downloadCoordinator.listings) { _, _ -> Unit }
+        .collect {
+            val current = graph.downloadGroups()
+            val currentIds = current.mapTo(mutableSetOf()) { it.id }
+            // 任务表里已经消失的父任务要明确推 removed，否则前端留着幽灵进度条
+            for (id in sent.keys.toList()) {
+                if (id !in currentIds) {
+                    sent.remove(id)
+                    out.send("event: download.group.removed\ndata: ${json.encodeToString(DownloadGroupRemovedEvent(id))}\n\n")
+                }
+            }
+            for (group in current) {
+                val stamp = "${group.status}/${group.childCount}/${group.completedCount}/${group.bytesDone}/${group.bytesTotal}/${group.percent}"
+                if (sent[group.id] == stamp) continue
+                sent[group.id] = stamp
+                out.send("event: download.group\ndata: ${json.encodeToString(group)}\n\n")
+            }
+        }
+}
+
+/** 删除离线任务后由路由发出，前端据此把行从列表里移除。 */
+private suspend fun streamTaskRemovals(graph: ServiceGraph, out: SendChannel<String>) {
+    graph.taskRemovalEvents.collect { id ->
+        out.send("event: task.removed\ndata: ${json.encodeToString(TaskRemovedEvent(id))}\n\n")
     }
 }
 
