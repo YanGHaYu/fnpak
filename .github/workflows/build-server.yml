@@ -1,0 +1,79 @@
+name: build-server
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 让 Gradle 只使用 CI 安装的 JDK
+        run: |
+          mkdir -p "${GRADLE_USER_HOME:-$HOME/.gradle}"
+          echo "org.gradle.java.installations.paths=$JAVA_HOME" >> "${GRADLE_USER_HOME:-$HOME/.gradle}/gradle.properties"
+
+      - name: Build server distribution
+        run: |
+          chmod +x gradlew scripts/*.sh
+          ./gradlew :server:installDist --configure-on-demand --no-daemon --stacktrace
+
+      - name: Read app metadata from manifest
+        id: meta
+        run: |
+          APPNAME=$(sed -n 's/^appname[[:space:]]*=[[:space:]]*//p' fnos/manifest | tr -d '\r' | head -1)
+          VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' fnos/manifest | tr -d '\r' | head -1)
+          test -n "$APPNAME"
+          test -n "$VERSION"
+          echo "appname=$APPNAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install fnpack (linux-amd64, sha256 verified)
+        env:
+          FNPACK_URL: https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64
+          FNPACK_SHA256: 72d2a4095da676b64510b023731a227b369d80f8079bc45ff8a2f802ec0480c1
+        run: |
+          curl -fsSL "$FNPACK_URL" -o /tmp/fnpack
+          echo "${FNPACK_SHA256}  /tmp/fnpack" | sha256sum -c -
+          chmod +x /tmp/fnpack
+          /tmp/fnpack --help >/dev/null
+
+      - name: Build fpk
+        env:
+          FNPACK: /tmp/fnpack
+        run: ./scripts/build-fpk.sh
+
+      - name: Verify fpk (0755 + GLIBC <= 2.36)
+        run: ./scripts/check-fpk.sh build/fpk/stage
+
+      - name: Upload fpk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-package
+          path: |
+            dist/*.fpk
+            dist/sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,72 @@
+name: build-web
+
+on:
+  pull_request:
+    paths:
+      - 'web-ui/**'
+      - '.github/workflows/build-web.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web-ui
+
+      - name: Build
+        run: npm run build
+        working-directory: web-ui
+
+      - name: 校验提交的 server 静态资源与构建产物一致
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          root = pathlib.Path('.')
+          dist_html = (root / 'web-ui/dist/index.html').read_text(encoding='utf-8')
+          res_html = (root / 'server/src/main/resources/web/index.html').read_text(encoding='utf-8')
+          pat = re.compile(r'(?:src|href)="/(assets/[^"]+)"')
+
+          def assets(html):
+              return [a for a in pat.findall(html)]
+
+          d = assets(dist_html)
+          r = assets(res_html)
+          print('dist assets :', d)
+          print('server assets:', r)
+          if d != r:
+              print('ERROR: server/src/main/resources/web/index.html 引用的资源与 dist 不一致，需重新同步构建产物', file=sys.stderr)
+              sys.exit(1)
+
+          assets_dir = root / 'server/src/main/resources/web/assets'
+          missing = [a for a in d if not (assets_dir / a.removeprefix('assets/')).is_file()]
+          if missing:
+              print('ERROR: server 资源缺失：', missing, file=sys.stderr)
+              sys.exit(1)
+
+          extra = sorted(p.name for p in assets_dir.iterdir() if p.is_file()) 
+          extra = [n for n in extra if f'assets/{n}' not in d]
+          if extra:
+              print('ERROR: server 资源存在过期文件：', extra, file=sys.stderr)
+              sys.exit(1)
+          print('OK: 构建产物与 server 静态资源一致')
+          PY
