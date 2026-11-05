@@ -1,162 +1,152 @@
 <template>
-  <div>
-    <el-card shadow="never" class="card">
-      <template #header>
-        <div class="card-head">
-          <span class="title">服务</span>
-          <el-tag v-if="settings" size="small" effect="plain">FNPak · 非官方 · 版本 {{ settings.version }}</el-tag>
-          <div class="spacer" />
-          <el-button size="small" :loading="loading" @click="loadAll">刷新</el-button>
-        </div>
-      </template>
-      <dl v-if="settings" class="kv">
-        <dt>运行目录</dt>
-        <dd class="mono">{{ settings.home }}</dd>
-        <dt>当前下载位置</dt>
-        <dd class="mono">{{ settings.downloadDir }}</dd>
-        <dt>运行状态</dt>
+  <div class="space-y-3 md:space-y-4">
+    <section class="card p-4">
+      <header class="mb-3 flex flex-wrap items-center gap-2">
+        <h2 class="text-base font-semibold">服务</h2>
+        <span v-if="settings" class="rounded-full bg-surface2 px-2 py-0.5 text-xs text-muted">
+          FNPak · 非官方 · 版本 {{ settings.version }}
+        </span>
+        <span class="flex-1" />
+        <AppButton size="sm" variant="ghost" icon="refresh" :loading="loading" @click="loadAll">刷新</AppButton>
+      </header>
+      <dl v-if="settings" class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+        <dt class="text-muted">运行目录</dt>
+        <dd class="truncate font-mono text-xs leading-6" :title="settings.home">{{ settings.home }}</dd>
+        <dt class="text-muted">当前下载位置</dt>
+        <dd class="truncate font-mono text-xs leading-6" :title="settings.downloadDir">{{ settings.downloadDir }}</dd>
+        <dt class="text-muted">运行状态</dt>
         <dd>{{ state.health ? `正常 · 已运行 ${state.health.uptimeSeconds} 秒` : '状态未知' }}</dd>
       </dl>
-      <p v-else class="hint">{{ loadError || '加载中…' }}</p>
-    </el-card>
+      <p v-else class="text-sm text-muted">{{ loadError || '加载中…' }}</p>
+    </section>
 
-    <div class="settings-grid" style="margin-top: 12px">
-      <el-card shadow="never" class="card">
-        <template #header>
-          <div class="card-head"><span class="title">访问口令</span></div>
-        </template>
-        <dl v-if="settings" class="kv">
-          <dt>当前指纹</dt>
-          <dd class="mono">{{ settings.accessToken.fingerprint }}</dd>
-          <dt>来源</dt>
+    <div class="grid gap-3 md:grid-cols-2 md:gap-4">
+      <section class="card p-4">
+        <h2 class="mb-3 text-base font-semibold">访问口令</h2>
+        <dl v-if="settings" class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+          <dt class="text-muted">当前指纹</dt>
+          <dd class="truncate font-mono text-xs leading-6">{{ settings.accessToken.fingerprint }}</dd>
+          <dt class="text-muted">来源</dt>
           <dd>{{ settings.accessToken.source }}</dd>
-          <dt>口令文件</dt>
-          <dd class="mono">{{ settings.accessToken.filePath }}</dd>
+          <dt class="text-muted">口令文件</dt>
+          <dd class="truncate font-mono text-xs leading-6" :title="settings.accessToken.filePath">
+            {{ settings.accessToken.filePath }}
+          </dd>
         </dl>
-        <el-alert
+        <AppAlert
           v-if="settings && settings.accessToken.managedExternally"
-          type="warning"
-          :closable="false"
-          show-icon
-          title="口令由启动参数 / 环境变量管理，页面不可改（409 token_managed_externally）"
-          style="margin-top: 8px"
+          class="mt-2"
+          tone="warning"
+          message="口令由启动参数 / 环境变量管理，页面不可改（409 token_managed_externally）"
         />
-        <el-form label-position="top" style="margin-top: 10px" @submit.prevent="savePasscode">
-          <el-form-item label="新口令（至少 12 字符，字母数字与 - _ .）">
-            <el-input
+        <form class="mt-3 space-y-2" @submit.prevent="savePasscode">
+          <AppField label="新口令（至少 12 字符，字母数字与 - _ .）">
+            <AppInput
               v-model="newPasscode"
               type="password"
-              show-password
               :disabled="passcodeLocked"
               placeholder="12 位以上"
+              autocomplete="new-password"
             />
-          </el-form-item>
-          <el-button type="primary" size="small" :disabled="passcodeLocked" :loading="passcodeBusy" @click="savePasscode">
-            更新口令
-          </el-button>
-          <span class="hint" style="margin-left: 8px">更新后其它会话全部失效，本页继续可用。</span>
-          <p v-if="passcodeStatus" :class="passcodeError ? 'error-line' : 'hint'">{{ passcodeStatus }}</p>
-        </el-form>
-      </el-card>
+          </AppField>
+          <div class="flex flex-wrap items-center gap-2">
+            <AppButton size="sm" variant="primary" :disabled="passcodeLocked" :loading="passcodeBusy" @click="savePasscode">
+              更新口令
+            </AppButton>
+            <span class="text-xs text-muted">更新后其它会话全部失效，本页继续可用。</span>
+          </div>
+          <p v-if="passcodeStatus" class="text-xs" :class="passcodeError ? 'text-danger' : 'text-muted'">
+            {{ passcodeStatus }}
+          </p>
+        </form>
+      </section>
 
-      <el-card shadow="never" class="card">
-        <template #header>
-          <div class="card-head">
-            <span class="title">下载位置</span>
-            <div class="spacer" />
-            <el-button size="small" :loading="sharesBusy" @click="loadShares">刷新目录</el-button>
+      <section class="card p-4">
+        <header class="mb-3 flex items-center gap-2">
+          <h2 class="text-base font-semibold">下载位置</h2>
+          <span class="flex-1" />
+          <AppButton size="sm" variant="ghost" :loading="sharesBusy" @click="loadShares">刷新目录</AppButton>
+        </header>
+        <div class="space-y-3">
+          <AppField label="授权目录">
+            <AppSelect v-model="shareRoot" :options="shareOptions" placeholder="选择一个可写目录" />
+          </AppField>
+          <AppField label="相对路径（可空，留空即目录本身）">
+            <AppInput v-model="subPath" placeholder="例如 downloads / movies" />
+          </AppField>
+          <div class="flex flex-wrap gap-2">
+            <AppButton size="sm" :loading="testBusy" @click="submitDir(true)">测试写入</AppButton>
+            <AppButton size="sm" variant="primary" :loading="saveBusy2" @click="submitDir(false)">保存</AppButton>
           </div>
-        </template>
-        <el-form label-position="top">
-          <el-form-item label="授权目录">
-            <el-select v-model="shareRoot" style="width: 100%" placeholder="选择一个可写目录">
-              <el-option
-                v-for="share in shares"
-                :key="share.path"
-                :value="share.path"
-                :label="shareLabel(share)"
-                :disabled="!share.writable"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="相对路径（可空，留空即目录本身）">
-            <el-input v-model="subPath" placeholder="例如 downloads / movies" />
-          </el-form-item>
-          <div class="toolbar">
-            <el-button size="small" :loading="testBusy" @click="submitDir(true)">测试写入</el-button>
-            <el-button size="small" type="primary" :loading="saveBusy2" @click="submitDir(false)">保存</el-button>
-          </div>
-          <p v-if="dirStatus" :class="dirError ? 'error-line' : 'hint'" style="margin-top: 8px">{{ dirStatus }}</p>
-          <p v-if="sharesNote" class="hint" style="margin-top: 4px">{{ sharesNote }}</p>
-        </el-form>
-      </el-card>
+          <p v-if="dirStatus" class="text-xs" :class="dirError ? 'text-danger' : 'text-muted'">{{ dirStatus }}</p>
+          <p v-if="sharesNote" class="text-xs text-muted">{{ sharesNote }}</p>
+        </div>
+      </section>
     </div>
 
-    <el-card shadow="never" class="card" style="margin-top: 12px">
-      <template #header>
-        <div class="card-head"><span class="title">账号</span></div>
-      </template>
-      <dl class="kv">
-        <dt>当前账号</dt>
+    <section class="card p-4">
+      <h2 class="mb-3 text-base font-semibold">账号</h2>
+      <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+        <dt class="text-muted">当前账号</dt>
         <dd>{{ state.auth.authenticated ? (state.auth.displayName || state.auth.account || '已登录') : '未登录' }}</dd>
-        <dt>登录状态</dt>
+        <dt class="text-muted">登录状态</dt>
         <dd>{{ state.auth.authenticated ? '已登录' : '未登录' }}</dd>
       </dl>
-      <div class="toolbar" style="margin-top: 10px">
-        <el-button size="small" type="danger" plain :loading="logoutBusy" @click="logout">退出登录</el-button>
-        <span class="hint">会清除本机登录态，云端文件不受影响</span>
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <AppButton size="sm" variant="danger-soft" :loading="logoutBusy" @click="logout">退出登录</AppButton>
+        <span class="text-xs text-muted">会清除本机登录态，云端文件不受影响</span>
       </div>
-    </el-card>
+    </section>
 
-    <el-card shadow="never" class="card" style="margin-top: 12px">
-      <template #header>
-        <div class="card-head"><span class="title">下载并发</span></div>
-      </template>
-      <el-form label-position="top" :inline="true">
-        <el-form-item label="每任务分段数（1–32）">
-          <el-input-number v-model="segments" :min="1" :max="32" size="small" />
-        </el-form-item>
-        <el-form-item label="全局连接预算（4–64）">
-          <el-input-number v-model="maxConnections" :min="4" :max="64" size="small" />
-        </el-form-item>
-        <el-form-item>
-          <el-button size="small" type="primary" :loading="tuningBusy" @click="saveTuning">保存</el-button>
-        </el-form-item>
-      </el-form>
-      <p class="hint">
+    <section class="card p-4">
+      <h2 class="mb-3 text-base font-semibold">下载并发</h2>
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
+        <AppField label="每任务分段数（1–32）">
+          <AppInput v-model="segments" type="number" compact />
+        </AppField>
+        <AppField label="全局连接预算（4–64）">
+          <AppInput v-model="maxConnections" type="number" compact />
+        </AppField>
+        <AppButton size="sm" variant="primary" :loading="tuningBusy" @click="saveTuning">保存</AppButton>
+      </div>
+      <p class="mt-2 text-xs text-muted">
         分段数决定单个文件并发几条 Range 连接；连接预算是所有任务的总上限（活跃任务 × 每任务段数不会再直接放大成连接数）。
         改完对**新任务**生效，已在跑的任务沿用启动时的段数。
       </p>
-      <p v-if="tuningStatus" :class="tuningError ? 'error-line' : 'hint'" style="margin-top: 4px">
+      <p v-if="tuningStatus" class="mt-1 text-xs" :class="tuningError ? 'text-danger' : 'text-muted'">
         {{ tuningStatus }}
       </p>
-    </el-card>
+    </section>
 
-    <el-card shadow="never" class="card" style="margin-top: 12px">
-      <template #header>
-        <div class="card-head">
-          <span class="title">日志与故障</span>
-          <div class="spacer" />
-          <el-button size="small" @click="clearLogs">清空</el-button>
-          <el-button size="small" @click="copyDiagnostics">复制诊断</el-button>
-        </div>
-      </template>
-      <p class="hint">
-        服务端日志在 NAS 上：<span class="mono">$TRIM_PKGVAR/logs/</span>；这里只保留本页最近 40 条接口错误。
+    <section class="card p-4">
+      <header class="mb-2 flex items-center gap-2">
+        <h2 class="text-base font-semibold">日志与故障</h2>
+        <span class="flex-1" />
+        <AppButton size="sm" variant="ghost" @click="clearLogs">清空</AppButton>
+        <AppButton size="sm" variant="ghost" icon="copy" @click="copyDiagnostics">复制诊断</AppButton>
+      </header>
+      <p class="mb-2 text-xs text-muted">
+        服务端日志在 NAS 上：<span class="font-mono">$TRIM_PKGVAR/logs/</span>；这里只保留本页最近 40 条接口错误。
       </p>
-      <div class="log-list">
-        <div v-for="(entry, index) in state.logs" :key="index">
+      <div class="max-h-64 space-y-1 overflow-auto rounded-md bg-surface2 p-2 font-mono text-xs">
+        <div v-for="(entry, index) in state.logs" :key="index" class="break-words">
           {{ entry.time }} · {{ entry.status }} {{ entry.code }} · {{ entry.path }} · {{ entry.message }}
         </div>
-        <div v-if="!state.logs.length" class="muted">最近没有接口错误</div>
+        <div v-if="!state.logs.length" class="text-muted">最近没有接口错误</div>
       </div>
-    </el-card>
+    </section>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import AppAlert from '../components/ui/AppAlert.vue'
+import AppButton from '../components/ui/AppButton.vue'
+import AppField from '../components/ui/AppField.vue'
+import AppInput from '../components/ui/AppInput.vue'
+import AppSelect from '../components/ui/AppSelect.vue'
+import { toast } from '../components/ui/toast'
 import { api, errorDetail } from '../api'
 import { refreshAuth, state } from '../store'
 
@@ -182,12 +172,19 @@ const saveBusy2 = ref(false)
 const dirStatus = ref('')
 const dirError = ref(false)
 
-const segments = ref(8)
-const maxConnections = ref(32)
+const segments = ref('8')
+const maxConnections = ref('32')
 const tuningBusy = ref(false)
 const tuningStatus = ref('')
 const tuningError = ref(false)
 
+const shareOptions = computed(() =>
+  shares.value.map((share) => ({
+    value: share.path,
+    label: shareLabel(share),
+    disabled: !share.writable,
+  })),
+)
 const shareLabel = (share) =>
   share.writable ? share.path : `${share.path}（只读：${share.reason || '不可写'}）`
 
@@ -201,8 +198,8 @@ async function loadAll() {
     return
   }
   settings.value = result.data
-  segments.value = result.data.segmentCount ?? 8
-  maxConnections.value = result.data.maxConnections ?? 32
+  segments.value = String(result.data.segmentCount ?? 8)
+  maxConnections.value = String(result.data.maxConnections ?? 32)
   await loadShares()
 }
 
@@ -275,7 +272,10 @@ async function saveTuning() {
   tuningError.value = false
   const result = await api('/api/settings/download-tuning', {
     method: 'POST',
-    body: JSON.stringify({ segments: segments.value, maxConnections: maxConnections.value }),
+    body: JSON.stringify({
+      segments: Number(segments.value),
+      maxConnections: Number(maxConnections.value),
+    }),
   })
   tuningBusy.value = false
   if (!result.ok) {
@@ -299,9 +299,9 @@ async function copyDiagnostics() {
   )
   try {
     await navigator.clipboard.writeText(text)
-    ElMessage.success('诊断信息已复制')
+    toast.success('诊断信息已复制')
   } catch (_) {
-    ElMessage.warning('浏览器不允许访问剪贴板')
+    toast.warning('浏览器不允许访问剪贴板')
   }
 }
 
@@ -319,7 +319,6 @@ async function logout() {
 }
 
 onMounted(async () => {
-  // 直接打开 /settings 时首页还没拉过账号态，这里补一次，账号区块才不会误显示“未登录”
   await refreshAuth()
   await loadAll()
 })

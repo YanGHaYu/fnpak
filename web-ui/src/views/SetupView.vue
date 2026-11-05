@@ -1,61 +1,69 @@
 <template>
-  <el-card class="gate setup" shadow="never">
-    <template #header>
-      <div class="card-head">
-        <span class="title">首次设置访问口令</span>
-        <span class="muted" style="font-size: 12px">FNPak 还没有访问口令，设置后才能进入</span>
+  <div class="mx-auto w-full max-w-md py-6 md:py-16">
+    <div class="card p-5 md:p-6">
+      <div class="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <h1 class="text-lg font-semibold">首次设置访问口令</h1>
+          <p class="mt-1 text-xs text-muted">FNPak 还没有访问口令，设置后才能进入</p>
+        </div>
       </div>
-    </template>
-    <el-alert
-      v-if="!state.setup.setupWindowOpen"
-      type="warning"
-      show-icon
-      :closable="false"
-      title="首次设置窗口已关闭"
-      description="请用命令行重置：删除数据目录下的 access-token 文件（若存在）后重启服务，即可重新进入设置向导。"
-      style="margin-bottom: 12px"
-    />
-    <el-form label-position="top" @submit.prevent="submit">
-      <el-form-item label="口令">
-        <el-input
-          v-model="passcode"
-          type="password"
-          show-password
-          placeholder="至少 12 个字符，只能用字母、数字和 - _ ."
-          autofocus
-          :disabled="!state.setup.setupWindowOpen"
-          @keyup.enter="submit"
-        />
-      </el-form-item>
-      <el-form-item label="确认口令">
-        <el-input
-          v-model="confirmPasscode"
-          type="password"
-          show-password
-          placeholder="再输入一次"
-          :disabled="!state.setup.setupWindowOpen"
-          @keyup.enter="submit"
-        />
-      </el-form-item>
-      <div class="muted" style="font-size: 12px; margin-bottom: 8px">
-        规则：长度 ≥ 12，仅允许 <code>A-Z a-z 0-9 . _ -</code>；设置成功后直接建立会话并进入首页。
-      </div>
-      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
-      <div class="toolbar" style="margin-top: 12px">
-        <el-button type="primary" :loading="busy" :disabled="!state.setup.setupWindowOpen" @click="submit">
-          设置并进入
-        </el-button>
-        <span class="hint">
-          窗口默认 15 分钟，可用 <code>--setup-window-minutes</code> 调整（0 = 不限）
-        </span>
-      </div>
-    </el-form>
-  </el-card>
+
+      <AppAlert
+        v-if="!state.setup.setupWindowOpen"
+        tone="warning"
+        title="首次设置窗口已关闭"
+        message="请用命令行重置：删除数据目录下的 access-token 文件（若存在）后重启服务，即可重新进入设置向导。"
+        class="mb-3"
+      />
+
+      <form class="space-y-3" @submit.prevent="submit">
+        <AppField label="口令">
+          <AppInput
+            v-model="passcode"
+            type="password"
+            placeholder="至少 12 个字符，只能用字母、数字和 - _ ."
+            :disabled="!state.setup.setupWindowOpen"
+            @submit="submit"
+          />
+        </AppField>
+        <AppField label="确认口令">
+          <AppInput
+            v-model="confirmPasscode"
+            type="password"
+            placeholder="再输入一次"
+            :disabled="!state.setup.setupWindowOpen"
+            @submit="submit"
+          />
+        </AppField>
+        <p class="text-xs text-muted">
+          规则：长度 ≥ 12，仅允许 <span class="font-mono">A-Z a-z 0-9 . _ -</span>；设置成功后直接建立会话并进入首页。
+        </p>
+        <AppAlert v-if="error" tone="error" :message="error" />
+        <div class="flex flex-wrap items-center gap-3">
+          <AppButton
+            variant="primary"
+            :loading="busy"
+            :disabled="!state.setup.setupWindowOpen"
+            @click="submit"
+          >
+            设置并进入
+          </AppButton>
+          <span class="text-xs text-muted">
+            窗口默认 15 分钟，可用 <span class="font-mono">--setup-window-minutes</span> 调整（0 = 不限）
+          </span>
+        </div>
+      </form>
+    </div>
+  </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import AppAlert from '../components/ui/AppAlert.vue'
+import AppButton from '../components/ui/AppButton.vue'
+import AppField from '../components/ui/AppField.vue'
+import AppInput from '../components/ui/AppInput.vue'
 import { api, errorDetail } from '../api'
 import { markAccessLost, refreshAccess, state } from '../store'
 
@@ -91,7 +99,6 @@ async function submit() {
   busy.value = false
   if (!result.ok) {
     error.value = errorDetail(result)
-    // 窗口关闭时同步刷新状态，让页面显示命令行重置提示
     if (result.status === 403) state.setup.setupWindowOpen = false
     return
   }
