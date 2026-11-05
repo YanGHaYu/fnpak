@@ -123,13 +123,16 @@
               </el-table-column>
             </el-table>
 
-            <!-- 多选操作条：只针对文件，文件夹单独走「下载文件夹」 -->
+            <!-- 多选操作条：文件与文件夹可同时选中，下载时合并成一个批次 -->
             <div v-if="driveSelection.length" class="selection-bar">
               <span>
-                已选 <b>{{ driveSelection.length }}</b> 项
-                <template v-if="folderSelectionCount">（含 {{ folderSelectionCount }} 个文件夹）</template>
+                已选 <b>{{ driveSelection.length }}</b> 项，其中
+                <b>{{ folderSelectionCount }}</b> 个文件夹、<b>{{ fileSelectionCount }}</b> 个文件
               </span>
-              <span class="muted">总大小 {{ formatSize(selectedBytes) || '—' }}</span>
+              <span class="muted">
+                文件 {{ formatSize(selectedBytes) || '0 B' }}
+                <template v-if="folderSelectionCount">；文件夹大小待扫描</template>
+              </span>
               <div class="spacer" />
               <el-button size="small" @click="clearDriveSelection">取消</el-button>
               <el-button size="small" type="danger" plain @click="deleteCloud">移入回收站</el-button>
@@ -409,14 +412,17 @@ const tab = ref('drive')
 const crumbs = ref([{ id: '', name: '根目录' }])
 const items = ref([])
 const listStatus = ref('')
-const listHint = ref('只展示第一页；勾选文件可多选下载，文件夹请点「下载文件夹」。')
+const listHint = ref('只展示第一页；文件与文件夹都能勾选，混合下载会合并成一个批次（文件夹先递归扫描）。')
 const listBusy = ref(false)
 const driveTable = ref(null)
 const driveSelection = ref([])
 const batchBusy = ref(false)
 const currentParentId = computed(() => crumbs.value[crumbs.value.length - 1].id)
-const selectedBytes = computed(() => driveSelection.value.reduce((sum, row) => sum + (row.sizeBytes || 0), 0))
+const selectedBytes = computed(() =>
+  driveSelection.value.filter((row) => !row.isFolder).reduce((sum, row) => sum + (row.sizeBytes || 0), 0),
+)
 const folderSelectionCount = computed(() => driveSelection.value.filter((row) => row.isFolder).length)
+const fileSelectionCount = computed(() => driveSelection.value.filter((row) => !row.isFolder).length)
 
 const downloads = ref([])
 const groups = ref([])
@@ -695,16 +701,12 @@ async function loadDownloads() {
 }
 
 async function downloadSelected() {
-  const files = driveSelection.value.filter((row) => !row.isFolder)
-  const folders = driveSelection.value.length - files.length
-  if (!files.length) {
-    listStatus.value = '选中的都是文件夹，请点行内「下载文件夹」'
-    return
-  }
+  const rows = driveSelection.value
+  if (!rows.length) return
   batchBusy.value = true
-  const result = await api('/api/downloads/batch', {
+  const result = await api('/api/downloads/mixed', {
     method: 'POST',
-    body: JSON.stringify({ fileIds: files.map((row) => row.id) }),
+    body: JSON.stringify({ ids: rows.map((row) => row.id) }),
   })
   batchBusy.value = false
   if (!result.ok) {
@@ -712,20 +714,13 @@ async function downloadSelected() {
     return
   }
   const data = result.data || {}
-  if (!data.childCount) {
-    const reasons = (data.skipped || []).map((row) => row.reason).join('；')
-    listStatus.value = reasons ? `没有可下载的文件：${reasons}` : '没有可下载的文件'
-    return
-  }
   clearDriveSelection()
   tab.value = 'downloads'
   await loadDownloads()
-  downloadHint.value = data.groupId
-    ? `已加入同一批次（父任务 ${data.groupId}），进度合并显示`
-    : '已加入下载'
-  if (folders > 0 && data.skipped?.length) {
-    listStatus.value = `${folders} 个文件夹未加入下载（请单独点「下载文件夹」）`
-  }
+  const folders = data.folderCount || 0
+  downloadHint.value = folders
+    ? `已创建批次 ${data.groupId}：${folders} 个文件夹正在扫描，文件已入队；进度会合并显示`
+    : `已加入同一批次（${data.groupId}），进度合并显示`
 }
 
 async function downloadFolder(row) {

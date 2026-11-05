@@ -6,6 +6,7 @@ import dev.piko.server.auth.PikPakCaptchaClient
 import dev.piko.server.download.ConnectionBudget
 import dev.piko.server.download.DownloadGroupRegistry
 import dev.piko.server.download.DownloadTuning
+import dev.piko.server.download.MixedScanRegistry
 import dev.piko.server.download.SegmentDownloader
 import dev.piko.server.download.ServerDownloadStorage
 import dev.piko.server.download.ServerFolderSource
@@ -139,6 +140,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     /** 父任务「取消」标记（与暂停区分），落盘在数据目录，重启后仍显示 CANCELLED。 */
     val downloadGroupRegistry = DownloadGroupRegistry(config.home)
+    val mixedScanRegistry = MixedScanRegistry()
 
     /** 离线任务被删除后推给 SSE，前端据此移除行，不必重拉整页。 */
     val taskRemovalEvents = MutableSharedFlow<String>(extraBufferCapacity = 64)

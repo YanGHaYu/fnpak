@@ -85,7 +85,11 @@ private suspend fun streamDownloads(graph: ServiceGraph, out: SendChannel<String
 /** 父任务汇总：扫描期与下载期都按同一个批次 ID 推送，前端把一行进度条合并显示。 */
 private suspend fun streamGroups(graph: ServiceGraph, out: SendChannel<String>) {
     val sent = mutableMapOf<String, String>()
-    combine(graph.downloadCoordinator.tasks, graph.downloadCoordinator.listings) { _, _ -> Unit }
+    combine(
+        graph.downloadCoordinator.tasks,
+        graph.downloadCoordinator.listings,
+        graph.mixedScanRegistry.scans,
+    ) { _, _, _ -> Unit }
         .collect {
             val current = graph.downloadGroups()
             val currentIds = current.mapTo(mutableSetOf()) { it.id }

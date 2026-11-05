@@ -374,6 +374,24 @@ data class BatchDownloadResponse(
 @Serializable
 data class FolderDownloadRequest(val folderId: String = "")
 
+/** 同一目录内混合选择：文件直接入队，文件夹递归展开后并入**同一个**批次。 */
+@Serializable
+data class MixedDownloadRequest(
+    val ids: List<String> = emptyList(),
+    val maxHeight: Int? = null,
+)
+
+@Serializable
+data class MixedDownloadResponse(
+    val groupId: String,
+    val phase: String = "SCANNING",
+    val folderCount: Int = 0,
+    val fileCount: Int = 0,
+    /** 扫描期只统计直接选中的文件；扫描完成后由 `GET /api/downloads` 给出最终值。 */
+    val childCount: Int = 0,
+    val bytesTotal: Long = 0,
+)
+
 @Serializable
 data class FolderDownloadResponse(
     val groupId: String,

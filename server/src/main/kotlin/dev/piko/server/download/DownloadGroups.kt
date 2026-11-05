@@ -38,9 +38,30 @@ fun ServiceGraph.downloadGroups(): List<DownloadGroupItem> {
         )
     }
 
+    val mixedScanning = mixedScanRegistry.scans.value.values.map { scan ->
+        DownloadGroupItem(
+            id = scan.id,
+            kind = "files",
+            name = scan.name,
+            rootFolderId = "",
+            status = if (scan.error != null) "FAILED" else "SCANNING",
+            childCount = scan.filesFound,
+            completedCount = 0,
+            bytesTotal = scan.bytesFound,
+            bytesDone = 0,
+            percent = 0.0,
+            speedBytesPerSec = 0,
+            error = scan.error,
+            createdAtMs = scan.createdAtMs,
+            path = downloadStorage.rootPath(),
+        )
+    }
+
     val byGroup = downloadCoordinator.tasks.value.values.groupBy { it.effectiveGroupId() }
     val taskGroups = byGroup.map { (groupId, tasks) -> groupOf(groupId, tasks) }
-    return (scanning + taskGroups).sortedByDescending { it.createdAtMs }
+    val taskIds = byGroup.keys
+    return (scanning + mixedScanning.filter { it.id !in taskIds } + taskGroups)
+        .sortedByDescending { it.createdAtMs }
 }
 
 private fun ServiceGraph.groupOf(groupId: String, tasks: List<DownloadTask>): DownloadGroupItem {

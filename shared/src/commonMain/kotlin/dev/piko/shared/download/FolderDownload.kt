@@ -50,7 +50,7 @@ data class FolderListing(
 class QuotaExcess(val neededBytes: Long, val remainingBytes: Long)
 
 /** 文件夹里的一个文件与它落在下载目录里的相对路径。 */
-internal class PlannedFile(val file: FileStat, val path: String)
+class PlannedFile(val file: FileStat, val path: String)
 
 /**
  * 列出 [folder] 下全部可下载的文件，路径以文件夹名打头、保持子文件夹结构。
@@ -59,7 +59,7 @@ internal class PlannedFile(val file: FileStat, val path: String)
  * 服务端的限流。上传中的文件不算（下载必然失败），同一文件夹里清理后撞名的加序号，不然两个任务写同一个文件。
  * 撞名按不分大小写判断：Windows 与 Android 的共享存储都不分。
  */
-internal suspend fun planFolderDownload(
+suspend fun planFolderDownload(
     folder: FileStat,
     source: DownloadFolderSource,
     rootName: String = FileNameSanitizer.sanitizeFolderName(folder.name),

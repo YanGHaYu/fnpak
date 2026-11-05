@@ -1,5 +1,6 @@
 package dev.piko.server.download
 
+import dev.piko.data.repository.FileNameSanitizer
 import dev.piko.download.DownloadTask
 import dev.piko.server.BatchDownloadRequest
 import dev.piko.server.BatchDownloadResponse
@@ -10,11 +11,15 @@ import dev.piko.server.DownloadRecordDeleteRequest
 import dev.piko.server.DownloadRecordDeleteResponse
 import dev.piko.server.FolderDownloadRequest
 import dev.piko.server.FolderDownloadResponse
+import dev.piko.server.MixedDownloadRequest
+import dev.piko.server.MixedDownloadResponse
 import dev.piko.server.ServiceGraph
 import dev.piko.server.SkippedFile
 import dev.piko.server.StartDownloadRequest
 import dev.piko.server.drive.requireLogin
 import dev.piko.server.respondError
+import dev.piko.shared.download.PlannedFile
+import dev.piko.shared.download.planFolderDownload
 import io.github.nihildigit.pikpak.FileKind
 import io.github.nihildigit.pikpak.FileStat
 import io.github.nihildigit.pikpak.TaskPhase
@@ -27,9 +32,12 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -173,11 +181,127 @@ fun Route.downloadRoutes(graph: ServiceGraph) {
             )
         }
 
+        /**
+         * 同一目录内混合选择：文件直接入队，文件夹递归展开后并进**同一个批次**。
+         * 扫描期立即返回 `SCANNING` 与已发现的文件数；完成后同一 `groupId` 变成任务表里的父任务。
+         */
+        post("/mixed") {
+            if (graph.requireLogin(call)) return@post
+            val body = runCatching { call.receive<MixedDownloadRequest>() }.getOrNull()
+                ?: return@post call.respondError(HttpStatusCode.BadRequest, "bad_request", "请求体必须是 JSON")
+            val ids = body.ids.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (ids.isEmpty()) {
+                return@post call.respondError(HttpStatusCode.BadRequest, "missing_ids", "ids 不能为空")
+            }
+            val semaphore = Semaphore(4)
+            val details = coroutineScope {
+                ids.map { id -> id to async { semaphore.withPermit { graph.driveRepository.getFileDetail(id) } } }
+                    .map { (id, job) -> id to job.await() }
+            }
+            val skipped = mutableListOf<SkippedFile>()
+            val folders = mutableListOf<FileStat>()
+            val files = mutableListOf<FileStat>()
+            details.forEach { (id, result) ->
+                result.fold(
+                    onSuccess = { detail ->
+                        when {
+                            detail.trashed -> skipped += SkippedFile(id, "在回收站里")
+                            detail.kind == FileKind.FOLDER -> folders += detail.toFolderStat()
+                            else -> files += detail.toFileStat()
+                        }
+                    },
+                    onFailure = { skipped += SkippedFile(id, it.message ?: "取文件详情失败") },
+                )
+            }
+            if (folders.isEmpty() && files.isEmpty()) {
+                return@post call.respondError(
+                    HttpStatusCode.BadRequest,
+                    "no_downloadable_items",
+                    "没有可下载的文件或文件夹" + if (skipped.isNotEmpty()) "（${skipped.size} 项被跳过）" else "",
+                )
+            }
+
+            val now = System.currentTimeMillis()
+            val groupId = "mixed@$now-${batchSequence.incrementAndGet()}"
+            val batchName = buildString {
+                if (folders.isNotEmpty()) append("${folders.size} 个文件夹")
+                if (folders.isNotEmpty() && files.isNotEmpty()) append(" + ")
+                if (files.isNotEmpty()) append("${files.size} 个文件")
+            }
+            val taken = mutableSetOf<String>()
+            val folderRoots = folders.map {
+                it.id to uniqueDownloadPath(FileNameSanitizer.sanitizeFolderName(it.name), taken, false)
+            }
+            val plannedFiles = files.map {
+                PlannedFile(it, uniqueDownloadPath(FileNameSanitizer.sanitize(it.name), taken, true))
+            }
+            val directBytes = plannedFiles.sumOf { it.file.sizeBytes }
+            val state = MixedScanState(
+                id = groupId,
+                name = batchName,
+                createdAtMs = now,
+                folderCount = folders.size,
+                fileCount = files.size,
+                filesFound = files.size,
+                bytesFound = directBytes,
+            )
+            graph.mixedScanRegistry.add(state)
+            val job: Job = graph.scope.launch {
+                try {
+                    val planned = mutableListOf<PlannedFile>()
+                    var folderFiles = 0
+                    var folderBytes = 0L
+                    for ((folderId, rootName) in folderRoots) {
+                        val folder = folders.first { it.id == folderId }
+                        val part = planFolderDownload(folder, graph.serverFolderSource, rootName) { found, bytes ->
+                            graph.mixedScanRegistry.update(groupId) {
+                                it.copy(
+                                    filesFound = files.size + folderFiles + found,
+                                    bytesFound = directBytes + folderBytes + bytes,
+                                )
+                            }
+                        }
+                        planned += part
+                        folderFiles += part.size
+                        folderBytes += part.sumOf { it.file.sizeBytes }
+                        graph.mixedScanRegistry.update(groupId) {
+                            it.copy(filesFound = files.size + folderFiles, bytesFound = directBytes + folderBytes)
+                        }
+                    }
+                    planned += plannedFiles
+                    graph.downloadCoordinator.enqueuePlannedBatch(
+                        batchId = groupId,
+                        batchName = batchName,
+                        files = planned,
+                        maxHeight = body.maxHeight,
+                    )
+                    graph.mixedScanRegistry.finish(groupId)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    graph.mixedScanRegistry.update(groupId) {
+                        it.copy(error = error.message ?: error::class.simpleName ?: "扫描失败")
+                    }
+                }
+            }
+            graph.mixedScanRegistry.attach(groupId, job)
+            call.respond(
+                MixedDownloadResponse(
+                    groupId = groupId,
+                    folderCount = folders.size,
+                    fileCount = files.size,
+                    childCount = files.size,
+                    bytesTotal = directBytes,
+                ),
+            )
+        }
+
         // 父任务操作：扫描中的文件夹、多文件批次、单文件任务都能用同一套入口
         post("/groups/{id}/pause") {
             val id = call.parameters["id"].orEmpty()
             when {
                 id.isEmpty() -> return@post call.respondError(HttpStatusCode.BadRequest, "missing_group_id", "缺少父任务 ID")
+                graph.mixedScanRegistry.contains(id) -> graph.mixedScanRegistry.cancel(id)
                 graph.downloadCoordinator.listings.value.containsKey(id) -> graph.downloadCoordinator.dismissListing(id)
                 id.startsWith("single:") -> graph.downloadCoordinator.pauseDownload(id.removePrefix("single:"))
                 else -> graph.downloadCoordinator.pauseBatch(id)
@@ -206,6 +330,10 @@ fun Route.downloadRoutes(graph: ServiceGraph) {
                 return@post call.respondError(HttpStatusCode.BadRequest, "missing_group_id", "缺少父任务 ID")
             }
             when {
+                graph.mixedScanRegistry.contains(id) -> {
+                    graph.mixedScanRegistry.cancel(id)
+                    graph.downloadGroupRegistry.markCancelled(id)
+                }
                 graph.downloadCoordinator.listings.value.containsKey(id) -> {
                     graph.downloadCoordinator.dismissListing(id)
                 }
@@ -236,6 +364,10 @@ fun Route.downloadRoutes(graph: ServiceGraph) {
             var removedTasks = 0
             for (id in ids) {
                 when {
+                    graph.mixedScanRegistry.contains(id) -> {
+                        graph.mixedScanRegistry.cancel(id)
+                        deleted += id
+                    }
                     graph.downloadCoordinator.listings.value.containsKey(id) -> {
                         graph.downloadCoordinator.dismissListing(id)
                         deleted += id
@@ -314,6 +446,18 @@ private fun DownloadTask.toItem() = DownloadItem(
     batchName = batch?.folderName.orEmpty(),
     batchIsFolder = batch?.isFolder == true,
 )
+
+private fun uniqueDownloadPath(raw: String, taken: MutableSet<String>, keepExtension: Boolean): String {
+    if (taken.add(raw.lowercase())) return raw
+    val base = if (keepExtension) raw.substringBeforeLast('.', raw) else raw
+    val extension = raw.removePrefix(base)
+    var index = 2
+    while (true) {
+        val candidate = "$base ($index)$extension"
+        if (taken.add(candidate.lowercase())) return candidate
+        index++
+    }
+}
 
 private fun io.github.nihildigit.pikpak.FileDetail.toFileStat() = FileStat(
     id = id,

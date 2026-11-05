@@ -504,6 +504,38 @@ class PikoDownloadCoordinator(
         return eligible.size
     }
 
+    /**
+     * 把「文件夹递归展开结果 + 直接选中的文件」一次性写成同一个批次（[batchId]）。
+     * 混合下载用：目录扫描在调用方完成，这里只负责按相对路径建任务并入队。
+     */
+    suspend fun enqueuePlannedBatch(
+        batchId: String,
+        batchName: String,
+        files: List<PlannedFile>,
+        maxHeight: Int? = null,
+        rootFolderId: String = "",
+    ): Int = withContext(Dispatchers.IO) {
+        val accepted = files.distinctBy { it.file.id }
+        if (accepted.isEmpty()) return@withContext 0
+        restoreCompleted.await()
+        enqueueLock.withLock {
+            val now = Clock.System.now().toEpochMilliseconds()
+            val account = currentAccount()
+            val batch = DownloadBatch(
+                id = batchId,
+                folderName = batchName,
+                isFolder = false,
+                sourceFolderId = rootFolderId.takeIf { it.isNotBlank() },
+            )
+            val listing = FolderListing(batch, createdAtMs = now, account = account)
+            val lengths = storage.existingLengths(accepted.map { it.path })
+            val cap = maxHeight ?: defaultMaxHeight()
+            val tasks = accepted.map { plannedTask(it, listing, lengths[it.path] ?: 0L, cap) }
+            addBatch(batchId, tasks)
+        }
+        accepted.size
+    }
+
     /** 列出失败的重新列一遍。 */
     fun retryListing(batchId: String) {
         val listing = _listings.value[batchId] ?: return
