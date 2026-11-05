@@ -217,3 +217,254 @@ body {
   padding: 4px 10px 8px 44px;
 }
 
+/* 窄屏（≤768px）：表格降级为卡片列表，操作条贴底，触控目标 ≥44px。
+   纯 CSS 断点：同一套 DOM / 路由，桌面端完全不受影响。 */
+.mobile-only {
+  display: none;
+}
+
+/* 移动/复制的目标目录树（桌面与窄屏共用，窄屏在媒体查询里放大触控尺寸） */
+.dir-tree {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.dir-node-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dir-node-row.selected {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+
+.dir-toggle {
+  min-width: 28px;
+  padding: 0 4px;
+}
+
+.dir-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dir-state {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dir-children {
+  padding-left: 16px;
+}
+
+@media (max-width: 768px) {
+  .desktop-table {
+    display: none !important;
+  }
+
+  .mobile-only {
+    display: block;
+  }
+
+  .mobile-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0 8px;
+  }
+
+  .card {
+    overflow: visible;
+  }
+
+  /* el-tabs 内容区默认 overflow:hidden，会让贴底操作条失效 */
+  .workspace-tabs .el-tabs__content {
+    overflow: visible;
+  }
+
+  /* el-card__body 的 overflow:auto 会成为 sticky 的滚动容器，同样需要放开 */
+  .card .el-card__body {
+    overflow: visible;
+  }
+
+  .card .el-button,
+  .selection-bar .el-button,
+  .settings-grid .el-button {
+    min-height: 44px;
+    padding: 0 14px;
+  }
+
+  .card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .row-card .el-card__body {
+    padding: 10px 10px 8px;
+  }
+
+  .row-card-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .row-check {
+    height: 44px;
+    min-width: 44px;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .row-check .el-checkbox__inner {
+    width: 22px;
+    height: 22px;
+  }
+
+  .row-check .el-checkbox__inner::after {
+    width: 6px;
+    height: 13px;
+    left: 7px;
+    top: 1px;
+  }
+
+  .row-card-body {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+  }
+
+  .row-card-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 13.5px;
+    font-weight: 600;
+    word-break: break-all;
+  }
+
+  .row-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+  }
+
+  .card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .card-actions .el-button {
+    margin-left: 0;
+  }
+
+  .children-card {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--el-border-color-lighter);
+  }
+
+  .child-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    padding: 2px 0;
+  }
+
+  .child-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .selection-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 10px;
+    background: var(--el-bg-color);
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.08);
+  }
+
+  .selection-bar > span {
+    white-space: nowrap;
+    flex: 0 0 auto;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .selection-bar .spacer {
+    display: none;
+  }
+
+  .workspace-tabs .el-tabs__item {
+    height: 44px;
+    line-height: 44px;
+  }
+
+  .el-dialog {
+    width: 94vw !important;
+    max-width: 94vw;
+    max-height: 90vh;
+    margin-top: 5vh !important;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .el-dialog .el-dialog__body {
+    overflow: auto;
+    flex: 1;
+    max-height: calc(90vh - 100px);
+  }
+
+  .el-dialog .el-dialog__headerbtn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .video-box {
+    max-height: 56vh;
+  }
+
+  .dir-tree {
+    max-height: 40vh;
+  }
+
+  .dir-node-row {
+    min-height: 44px;
+  }
+
+  .dir-toggle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+

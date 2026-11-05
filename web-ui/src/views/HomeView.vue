@@ -92,6 +92,7 @@
 
             <el-table
               ref="driveTable"
+              class="desktop-table"
               :data="items"
               size="small"
               row-key="id"
@@ -112,16 +113,52 @@
                 </template>
               </el-table-column>
               <el-table-column prop="mimeType" label="类型" width="130" show-overflow-tooltip />
-              <el-table-column label="操作" width="220" align="right">
+              <el-table-column label="操作" width="300" align="right">
                 <template #default="{ row }">
                   <div class="row-actions" @click.stop>
                     <el-button v-if="row.isVideo" size="small" @click="openPlayer(row)">播放</el-button>
                     <el-button v-if="row.isFolder" size="small" type="primary" plain @click="downloadFolder(row)">下载文件夹</el-button>
                     <el-button v-if="!row.isFolder" size="small" type="primary" plain @click="startDownload(row.id)">下载</el-button>
+                    <el-button size="small" text @click="openRename(row)">重命名</el-button>
                   </div>
                 </template>
               </el-table-column>
             </el-table>
+
+            <!-- 窄屏降级：同一份数据渲染成卡片列表，勾选仍写回 el-table 的选中态 -->
+            <div class="mobile-only mobile-toolbar">
+              <el-button size="small" @click="toggleAllDrive">{{ allDriveSelected ? '取消全选' : '全选' }}</el-button>
+              <span class="muted">已选 {{ driveSelection.length }} 项</span>
+            </div>
+            <div class="mobile-only card-list">
+              <el-card v-for="row in items" :key="row.id" shadow="never" class="row-card">
+                <div class="row-card-main">
+                  <el-checkbox
+                    class="row-check"
+                    :model-value="isDriveSelected(row)"
+                    :disabled="!selectableRow(row)"
+                    @change="(value) => toggleDriveRow(row, value)"
+                  />
+                  <div class="row-card-body" @click="onRowClick(row)">
+                    <div class="row-card-title">
+                      <span :class="{ mono: !row.isFolder }">{{ row.name || row.id }}</span>
+                      <el-tag v-if="row.isFolder" size="small" type="info" effect="plain">目录</el-tag>
+                    </div>
+                    <div class="row-card-meta">
+                      <span v-if="!row.isFolder" class="num">{{ formatSize(row.sizeBytes) }}</span>
+                      <span>{{ row.isFolder ? '文件夹' : (row.mimeType || '—') }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="card-actions" @click.stop>
+                  <el-button v-if="row.isVideo" size="small" @click="openPlayer(row)">播放</el-button>
+                  <el-button v-if="row.isFolder" size="small" type="primary" plain @click="downloadFolder(row)">下载文件夹</el-button>
+                  <el-button v-if="!row.isFolder" size="small" type="primary" plain @click="startDownload(row.id)">下载</el-button>
+                  <el-button size="small" text @click="openRename(row)">重命名</el-button>
+                </div>
+              </el-card>
+              <p v-if="!items.length" class="hint">这个目录是空的</p>
+            </div>
 
             <!-- 多选操作条：文件与文件夹可同时选中，下载时合并成一个批次 -->
             <div v-if="driveSelection.length" class="selection-bar">
@@ -135,6 +172,13 @@
               </span>
               <div class="spacer" />
               <el-button size="small" @click="clearDriveSelection">取消</el-button>
+              <el-button
+                size="small"
+                :disabled="driveSelection.length !== 1"
+                @click="openRename(driveSelection[0])"
+              >重命名</el-button>
+              <el-button size="small" @click="openTargetDialog('move')">移动</el-button>
+              <el-button size="small" @click="openTargetDialog('copy')">复制</el-button>
               <el-button size="small" type="danger" plain @click="deleteCloud">移入回收站</el-button>
               <el-button size="small" type="primary" :loading="batchBusy" @click="downloadSelected">下载</el-button>
             </div>
@@ -198,6 +242,7 @@
 
             <el-table
               ref="groupTable"
+              class="desktop-table"
               :data="groups"
               size="small"
               row-key="id"
@@ -294,6 +339,86 @@
               </el-table-column>
             </el-table>
 
+            <div class="mobile-only mobile-toolbar">
+              <el-button size="small" @click="toggleAllGroups">{{ allGroupsSelected ? '取消全选' : '全选' }}</el-button>
+              <span class="muted">已选 {{ groupSelection.length }} 项</span>
+            </div>
+            <div class="mobile-only card-list">
+              <el-card v-for="row in groups" :key="row.id" shadow="never" class="row-card">
+                <div class="row-card-main">
+                  <el-checkbox
+                    class="row-check"
+                    :model-value="isGroupSelected(row)"
+                    @change="(value) => toggleGroupRow(row, value)"
+                  />
+                  <div class="row-card-body">
+                    <div class="row-card-title">
+                      <span>{{ row.name }}</span>
+                      <el-tag size="small" effect="plain" type="info">{{ kindText(row.kind) }}</el-tag>
+                    </div>
+                    <div class="row-card-meta">
+                      <el-tag size="small" :type="statusType(row.status)" effect="plain">{{ groupStatusText(row.status) }}</el-tag>
+                      <span class="num">{{ formatSpeed(row.speedBytesPerSec) }}</span>
+                    </div>
+                    <div class="progress-cell" style="margin-top: 6px">
+                      <el-progress
+                        v-if="row.status !== 'SCANNING'"
+                        :percentage="Number(row.percent) || 0"
+                        :status="progressStatus(row.status)"
+                        :stroke-width="10"
+                      />
+                      <span v-else class="hint">扫描中…</span>
+                      <span class="hint mono">
+                        <template v-if="row.status === 'SCANNING'">
+                          已发现 {{ row.childCount }} 个文件 / {{ formatSize(row.bytesTotal) || '0' }}
+                        </template>
+                        <template v-else>
+                          {{ row.completedCount }}/{{ row.childCount }} · {{ formatSize(row.bytesDone) || '0' }} /
+                          {{ formatSize(row.bytesTotal) || '—' }}
+                        </template>
+                      </span>
+                    </div>
+                    <div v-if="row.error" class="error-line">{{ row.error }}</div>
+                  </div>
+                </div>
+                <div class="card-actions">
+                  <el-button
+                    v-if="isTerminal(row.status)"
+                    size="small"
+                    type="danger"
+                    plain
+                    @click="deleteRecords([row])"
+                  >删除任务</el-button>
+                  <template v-else>
+                    <el-button size="small" :disabled="!canPause(row)" @click="groupAction(row, 'pause')">暂停</el-button>
+                    <el-button
+                      size="small"
+                      type="primary"
+                      plain
+                      :disabled="!canResume(row)"
+                      @click="groupAction(row, 'resume')"
+                    >继续</el-button>
+                    <el-button
+                      size="small"
+                      type="danger"
+                      plain
+                      :disabled="!canPause(row)"
+                      @click="groupAction(row, 'cancel')"
+                    >取消</el-button>
+                  </template>
+                </div>
+                <div v-if="childrenOf(row).length" class="children-card">
+                  <div v-for="child in childrenOf(row)" :key="child.id" class="child-line">
+                    <span class="mono child-name">{{ child.fileName }}</span>
+                    <span class="muted">{{ child.status }}</span>
+                    <span class="num">{{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}</span>
+                  </div>
+                </div>
+                <p v-else-if="row.status === 'SCANNING'" class="hint" style="margin: 6px 0 0">子项还在扫描或入队中…</p>
+              </el-card>
+              <p v-if="!groups.length" class="hint">还没有下载任务</p>
+            </div>
+
             <div v-if="groupSelection.length" class="selection-bar">
               <span>已选 <b>{{ groupSelection.length }}</b> 项</span>
               <div class="spacer" />
@@ -333,6 +458,7 @@
 
             <el-table
               ref="tasksTable"
+              class="desktop-table"
               :data="tasks"
               size="small"
               row-key="id"
@@ -374,6 +500,42 @@
               </el-table-column>
             </el-table>
 
+            <div class="mobile-only mobile-toolbar">
+              <el-button size="small" @click="toggleAllOffline">{{ allOfflineSelected ? '取消全选' : '全选' }}</el-button>
+              <span class="muted">已选 {{ offlineSelection.length }} 项</span>
+            </div>
+            <div class="mobile-only card-list">
+              <el-card v-for="row in tasks" :key="row.id" shadow="never" class="row-card">
+                <div class="row-card-main">
+                  <el-checkbox
+                    class="row-check"
+                    :model-value="isOfflineSelected(row)"
+                    @change="(value) => toggleOfflineRow(row, value)"
+                  />
+                  <div class="row-card-body">
+                    <div class="row-card-title">
+                      <span>{{ row.name || row.id }}</span>
+                    </div>
+                    <div class="row-card-meta">
+                      <el-tag v-if="row.type === 'folder'" size="small" type="warning" effect="plain">
+                        文件夹{{ row.folderChildCount ? ` · ${row.folderChildCount}${row.folderChildCountTruncated ? '+' : ''}` : '' }}
+                      </el-tag>
+                      <el-tag v-else-if="row.type === 'file'" size="small" type="info" effect="plain">文件</el-tag>
+                      <span>{{ phaseText(row.phase) }}</span>
+                      <span class="num">{{ formatSize(row.fileSize) || '—' }}</span>
+                    </div>
+                    <div class="progress-cell" style="margin-top: 6px">
+                      <el-progress :percentage="Number(row.progress) || 0" :stroke-width="9" />
+                    </div>
+                  </div>
+                </div>
+                <div class="card-actions">
+                  <el-button size="small" type="danger" plain :loading="deleteBusy" @click="deleteOffline([row.id])">删除</el-button>
+                </div>
+              </el-card>
+              <p v-if="!tasks.length" class="hint">没有离线任务</p>
+            </div>
+
             <div v-if="offlineSelection.length" class="selection-bar">
               <span>已选 <b>{{ offlineSelection.length }}</b> 项</span>
               <div class="spacer" />
@@ -388,12 +550,53 @@
       </el-tabs>
     </div>
 
+    <!-- 重命名：单输入框，预填原名，实时校验与服务端相同的规则 -->
+    <el-dialog v-model="renameDialog.open" title="重命名" width="420px" class="rename-dialog">
+      <el-form label-position="top" @submit.prevent="submitRename">
+        <el-form-item label="新名称">
+          <el-input v-model="renameDialog.name" maxlength="255" show-word-limit @keyup.enter="submitRename" />
+        </el-form-item>
+        <p v-if="renameError" class="error-line">{{ renameError }}</p>
+        <p v-else class="hint">原名：{{ renameDialog.original }}</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="renameDialog.open = false">取消</el-button>
+        <el-button type="primary" :disabled="!!renameError" :loading="renameDialog.busy" @click="submitRename">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 移动 / 复制：目录树懒加载，点目录名选中，底部确认 -->
+    <el-dialog
+      v-model="targetDialog.open"
+      :title="targetDialog.mode === 'move' ? '移动到…' : '复制到…'"
+      width="480px"
+      class="target-dialog"
+    >
+      <p class="hint" style="margin: 0 0 6px">目标：{{ targetDialog.pathLabel }}</p>
+      <div class="dir-tree">
+        <DirTreePicker ref="treeRef" :node="targetTree" :selected-id="targetDialog.targetId" @select="onSelectTarget" />
+      </div>
+      <p class="hint" style="margin: 8px 0 0">
+        已选 {{ driveSelection.length }} 项；不能选择所选文件夹自身或其子目录。
+        {{ targetDialog.mode === 'copy' ? '复制由 PikPak 服务端按任务执行，源文件保留。' : '' }}
+      </p>
+      <template #footer>
+        <el-button @click="targetDialog.open = false">取消</el-button>
+        <el-button type="primary" :loading="targetDialog.busy" @click="submitMoveCopy">
+          在此处{{ targetDialog.mode === 'move' ? '移动' : '复制' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
     <PlayerDialog ref="playerRef" v-model="playerOpen" :item="playingItem" />
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import DirTreePicker from '../components/DirTreePicker.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
 import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
 import { refreshAuth, state } from '../store'
@@ -435,6 +638,29 @@ const tasksTable = ref(null)
 const offlineSelection = ref([])
 const offlineHint = ref('')
 const deleteBusy = ref(false)
+
+// 重命名 / 移动 / 复制
+const renameDialog = reactive({ open: false, id: '', original: '', name: '', busy: false })
+const renameError = computed(() => {
+  const name = renameDialog.name.trim()
+  if (!name) return '名称不能为空'
+  if (name.length > 255) return `名称不能超过 255 个字符（当前 ${name.length}）`
+  if (name.includes('/') || name.includes('\\')) return '名称不能包含 / 或 \\'
+  return ''
+})
+const targetDialog = reactive({ open: false, mode: 'move', targetId: '', pathLabel: '根目录', busy: false })
+const targetTree = reactive({
+  id: '',
+  name: '根目录',
+  path: [],
+  isFolder: true,
+  children: [],
+  loaded: false,
+  loading: false,
+  expanded: false,
+  error: '',
+})
+const treeRef = ref(null)
 
 const linkForm = reactive({ link: '', passCode: '' })
 const parsed = ref(null)
@@ -659,6 +885,40 @@ function onDriveSelection(rows) {
 function clearDriveSelection() {
   driveTable.value?.clearSelection()
   driveSelection.value = []
+}
+
+// 窄屏卡片列表与桌面表格共用一份选中态：卡片勾选写回 el-table
+const allDriveSelected = computed(
+  () => items.value.length > 0 && driveSelection.value.length === items.value.length,
+)
+const isDriveSelected = (row) => driveSelection.value.some((item) => item.id === row.id)
+function toggleDriveRow(row, value) {
+  driveTable.value?.toggleRowSelection(row, value)
+}
+function toggleAllDrive() {
+  driveTable.value?.toggleAllSelection()
+}
+
+const allGroupsSelected = computed(
+  () => groups.value.length > 0 && groupSelection.value.length === groups.value.length,
+)
+const isGroupSelected = (row) => groupSelection.value.some((item) => item.id === row.id)
+function toggleGroupRow(row, value) {
+  groupTable.value?.toggleRowSelection(row, value)
+}
+function toggleAllGroups() {
+  groupTable.value?.toggleAllSelection()
+}
+
+const allOfflineSelected = computed(
+  () => tasks.value.length > 0 && offlineSelection.value.length === tasks.value.length,
+)
+const isOfflineSelected = (row) => offlineSelection.value.some((item) => item.id === row.id)
+function toggleOfflineRow(row, value) {
+  tasksTable.value?.toggleRowSelection(row, value)
+}
+function toggleAllOffline() {
+  tasksTable.value?.toggleAllSelection()
 }
 
 function upsert(list, row) {
@@ -888,6 +1148,96 @@ async function deleteCloud() {
   listStatus.value = failed.length
     ? `已移入回收站 ${trashed.length} 项；失败 ${failed.length} 项：${failed.map((row) => row.message).join('；')}`
     : `已移入回收站 ${trashed.length} 项（可在回收站恢复）`
+}
+
+function openRename(row) {
+  if (!row) return
+  renameDialog.id = row.id
+  renameDialog.original = row.name || row.id
+  renameDialog.name = renameDialog.original
+  renameDialog.busy = false
+  renameDialog.open = true
+}
+
+async function submitRename() {
+  if (renameDialog.busy || renameError.value) return
+  renameDialog.busy = true
+  const name = renameDialog.name.trim()
+  const result = await api(`/api/drive/files/${encodeURIComponent(renameDialog.id)}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+  renameDialog.busy = false
+  if (!result.ok) {
+    listStatus.value = errorDetail(result)
+    return
+  }
+  renameDialog.open = false
+  await loadList()
+  listStatus.value = `已重命名为「${result.data?.name || name}」`
+}
+
+async function openTargetDialog(mode) {
+  if (!driveSelection.value.length) return
+  targetDialog.mode = mode
+  targetDialog.targetId = ''
+  targetDialog.pathLabel = '根目录'
+  targetDialog.busy = false
+  targetDialog.open = true
+  Object.assign(targetTree, {
+    id: '',
+    name: '根目录',
+    path: [],
+    isFolder: true,
+    children: [],
+    loaded: false,
+    loading: false,
+    expanded: false,
+    error: '',
+  })
+  await nextTick()
+  treeRef.value?.load()
+}
+
+function onSelectTarget(node) {
+  targetDialog.targetId = node.id
+  targetDialog.pathLabel = node.path.length ? node.path.join(' / ') : '根目录'
+}
+
+async function submitMoveCopy() {
+  if (targetDialog.busy) return
+  const ids = driveSelection.value.map((row) => row.id)
+  if (!ids.length) return
+  targetDialog.busy = true
+  const result = await api(`/api/drive/${targetDialog.mode}`, {
+    method: 'POST',
+    body: JSON.stringify({ ids, targetParentId: targetDialog.targetId }),
+  })
+  targetDialog.busy = false
+  if (!result.ok) {
+    listStatus.value = errorDetail(result)
+    return
+  }
+  const data = result.data || {}
+  const itemsResult = data.items || []
+  const succeeded = itemsResult.filter((row) => row.ok)
+  const failed = itemsResult.filter((row) => !row.ok)
+  const where = targetDialog.pathLabel
+  targetDialog.open = false
+  await loadList()
+  const failedRows = items.value.filter((row) => failed.some((item) => item.id === row.id))
+  await nextTick()
+  failedRows.forEach((row) => driveTable.value?.toggleRowSelection(row, true))
+  const failedText = failed.length
+    ? `；失败 ${failed.length} 项：${failed.map((row) => row.message || '未知原因').join('；')}`
+    : ''
+  if (targetDialog.mode === 'move') {
+    listStatus.value = `已移动 ${succeeded.length} 项到「${where}」${failedText}`
+  } else {
+    const tasks = succeeded.map((row) => row.taskId).filter(Boolean).join(', ')
+    listStatus.value = `已提交复制 ${succeeded.length} 项到「${where}」，源文件保留` +
+      `${tasks ? `；任务 ${tasks}（服务端异步执行，可稍后刷新目标目录）` : ''}${failedText}`
+  }
 }
 
 async function parseLink() {

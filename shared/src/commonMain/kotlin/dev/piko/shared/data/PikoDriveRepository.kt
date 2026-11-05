@@ -27,6 +27,7 @@ import io.github.nihildigit.pikpak.EventType
 import io.github.nihildigit.pikpak.FileReactivatingException
 import io.github.nihildigit.pikpak.UrlExpiredException
 import kotlinx.io.IOException
+import io.github.nihildigit.pikpak.DriveTask
 import io.github.nihildigit.pikpak.FileDetail
 import io.github.nihildigit.pikpak.FileFilter
 import io.github.nihildigit.pikpak.FileKind
@@ -2120,10 +2121,22 @@ open class PikoDriveRepository(
      * 复制到 [parentId]。服务端按任务执行，小批量在返回时已完成；目标里有同名项时自动改名为「名字(1)」。
      * 复制到自身或自己的子目录里会被拒绝（file_move_or_copy_to_cur）。SDK 已按 id 上限分批。
      */
-    suspend fun copy(ids: List<String>, parentId: String): Result<Unit> = withContext(Dispatchers.Default) {
+    suspend fun copy(ids: List<String>, parentId: String): Result<Unit> = copyWithTaskIds(ids, parentId).map { }
+
+    /**
+     * 与 [copy] 相同，但把 SDK 返回的 PikPak 任务 ID 交给调用方，便于用 [getDriveTask] 查询进度。
+     * 服务端复制是异步任务：POST 返回即表示已受理，不保证文件已经出现在目标目录。
+     */
+    suspend fun copyWithTaskIds(ids: List<String>, parentId: String): Result<List<String>> = withContext(Dispatchers.Default) {
         val started = TimeSource.Monotonic.markNow()
-        runSuspendCatching { requireCloudIds(ids + parentId); client.batchCopy(ids, parentId); Unit }.onSuccess { applyChange(DriveChange.Copied(ids, parentId)) }
+        runSuspendCatching { requireCloudIds(ids + parentId); client.batchCopy(ids, parentId) }
+            .onSuccess { applyChange(DriveChange.Copied(ids, parentId)) }
             .logOperation("复制到 ${LocalLocation.logIdentity(parentId) ?: parentId.ifEmpty { "根目录" }}", ids, started)
+    }
+
+    /** 查询云端 drive 任务（复制/解压等）的进度；只读，不改本地索引。 */
+    suspend fun getDriveTask(taskId: String): Result<DriveTask> = withContext(Dispatchers.Default) {
+        runSuspendCatching { client.getTask(taskId) }
     }
 
     /**

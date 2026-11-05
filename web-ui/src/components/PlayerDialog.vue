@@ -1,6 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
+    class="player-dialog"
     :title="item?.name || '播放'"
     width="min(980px, 94vw)"
     destroy-on-close

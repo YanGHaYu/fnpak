@@ -437,6 +437,53 @@ data class CloudDeleteResponse(
     val note: String = "已移入回收站，可在回收站恢复；不是永久删除",
 )
 
+// ---- 重命名 / 移动 / 复制 ----
+
+/** 重命名请求。名称在服务端 trim 后校验：非空、≤255、不能含 `/` 与 `\`。 */
+@Serializable
+data class RenameFileRequest(val name: String = "")
+
+@Serializable
+data class RenameFileResponse(val id: String, val name: String)
+
+/** 移动/复制到 [targetParentId]；空串表示根目录（SDK 的文件 ID 约定）。 */
+@Serializable
+data class MoveCopyRequest(val ids: List<String> = emptyList(), val targetParentId: String = "")
+
+/**
+ * 逐条结果。移动是同步的；复制由 PikPak 服务端按任务执行，成功项带 [taskId]，
+ * 可用 `GET /api/drive/tasks/{taskId}` 查询进度。
+ */
+@Serializable
+data class MoveCopyItem(
+    val id: String,
+    val ok: Boolean,
+    val taskId: String? = null,
+    val message: String? = null,
+)
+
+@Serializable
+data class MoveCopyResponse(
+    val mode: String,
+    val items: List<MoveCopyItem> = emptyList(),
+    val succeeded: Int = 0,
+    val failed: Int = 0,
+    val async: Boolean = false,
+    val note: String = "",
+)
+
+/** 云端 drive 任务（复制等）的进度快照。 */
+@Serializable
+data class DriveTaskResponse(
+    val id: String,
+    val kind: String = "",
+    val phase: String = "",
+    val progress: Int = 0,
+    val message: String = "",
+    val fileName: String = "",
+    val fileSize: String = "",
+)
+
 // ---- SSE 事件 ----
 
 @Serializable
