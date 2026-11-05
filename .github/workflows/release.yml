@@ -48,6 +48,7 @@ jobs:
       - name: Write release notes
         env:
           APPNAME: ${{ steps.meta.outputs.appname }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           cat > notes.md <<EOF
           > **非官方社区构建**：与 NihilDigit/Piko、PikPak、飞牛 fnOS 官方均无关联，未获其背书。
@@ -59,6 +60,17 @@ jobs:
 
           安装：在 fnOS 应用中心上传 fpk，首次打开设置访问口令，并为应用授权至少一个目录。
           EOF
+          # 本版变更：从 CHANGELOG.md 抽取当前版本段落，避免 Release 正文缺变更说明
+          grep -q "^## ${VERSION} " CHANGELOG.md || {
+            echo "ERROR: CHANGELOG.md 缺少 ${VERSION} 段落" >&2
+            exit 1
+          }
+          {
+            echo ""
+            echo "## 本版变更"
+            echo ""
+            awk -v hdr="## ${VERSION} " 'index($0, hdr) == 1 { found = 1; next } found && /^## / { exit } found { print }' CHANGELOG.md
+          } >> notes.md
 
       - name: Publish release
         env:
