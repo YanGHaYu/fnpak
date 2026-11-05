@@ -60,6 +60,7 @@ Gradle 会经 `foojay-resolver-convention` 自动下载，而该插件 0.9.0 在
   `~/.gradle/gradle.properties` 的 `org.gradle.java.installations.paths`。
 
 注意：桌面模块源码仍在原位，只是默认不参与配置；需要桌面开发时显式加 `-Pfnpak.full=true`。
+根任务 `run` 也只在 `full=true` 时注册，默认构建下 `./gradlew tasks` 里看不到它属正常现象。
 
 ## 常见问题
 
