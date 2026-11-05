@@ -196,16 +196,18 @@ body {
   align-items: center;
   gap: 8px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .tab-badge .el-badge__content {
   transform: translateY(-8px);
 }
 
+/* 多选操作条：说明文案单独一行，按钮单独一行，避免文案与按钮挤在一起 */
 .selection-bar {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   margin-top: 10px;
   padding: 8px 10px;
   border: 1px solid var(--el-border-color-lighter);
@@ -213,8 +215,45 @@ body {
   background: var(--el-fill-color-lighter);
 }
 
+.selection-info {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.selection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.selection-actions .el-button {
+  margin-left: 0;
+  white-space: nowrap;
+}
+
 .children {
   padding: 4px 10px 8px 44px;
+}
+
+/* 子项完整浏览：明确总数 + 固定高度滚动区，数百项也不会被展开区域裁掉 */
+.children-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.children-scroll {
+  max-height: 360px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* 窄屏（≤768px）：表格降级为卡片列表，操作条贴底，触控目标 ≥44px。
@@ -268,13 +307,161 @@ body {
   padding-left: 16px;
 }
 
+/* 名称列只放名称；行内操作是表格的独立最后一列 */
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.name-cell .name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 行内操作收敛为一个图标按钮：桌面为表格最后一列，移动端固定在卡片右上角 */
+.row-more {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.row-more:hover,
+.row-more[aria-expanded='true'] {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+
+.row-more:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
+}
+
+.row-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: -4px;
+}
+
+.row-menu-title {
+  margin: 0 0 4px;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row-menu-item:hover {
+  background: var(--el-fill-color-light);
+}
+
+.row-menu-item.danger {
+  color: var(--el-color-danger);
+}
+
+.row-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.row-menu-item:disabled:hover {
+  background: transparent;
+}
+
+.row-menu-icon {
+  font-size: 15px;
+}
+
+.row-action-popper {
+  padding: 6px !important;
+}
+
 @media (max-width: 768px) {
+  .topbar {
+    gap: 4px;
+    padding: 0 8px;
+    height: 52px;
+  }
+
+  .topbar .brand .ver {
+    display: none;
+  }
+
+  .topbar .health-chip {
+    display: none;
+  }
+
+  .topbar .el-button {
+    min-height: 44px;
+    padding: 0 8px;
+    margin-left: 0;
+  }
+
   .desktop-table {
     display: none !important;
   }
 
   .mobile-only {
     display: block;
+  }
+
+  .row-more {
+    width: 44px;
+    height: 44px;
+    font-size: 22px;
+  }
+
+  /* 行内「⋯」不占名称行：固定在卡片右上角，标题区右侧留出触控宽度 */
+  .row-card {
+    position: relative;
+  }
+
+  .row-card-action {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 5;
+  }
+
+  .row-card-title {
+    padding-right: 46px;
+  }
+
+  .row-menu-item {
+    min-height: 44px;
+    font-size: 14px;
   }
 
   .mobile-toolbar {
@@ -386,6 +573,20 @@ body {
     border-top: 1px dashed var(--el-border-color-lighter);
   }
 
+  .children-head {
+    font-size: 12px;
+  }
+
+  .children-scroll {
+    max-height: 320px;
+  }
+
+  /* 四个 Tab 在 375 宽下压缩内边距，保证一行放得下 */
+  .workspace-tabs .el-tabs__item {
+    padding: 0 10px;
+    font-size: 13px;
+  }
+
   .child-line {
     display: flex;
     align-items: center;
@@ -406,19 +607,29 @@ body {
     position: sticky;
     bottom: 0;
     z-index: 20;
-    flex-wrap: wrap;
-    row-gap: 8px;
+    gap: 8px;
     padding: 10px;
     background: var(--el-bg-color);
     box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.08);
   }
 
-  .selection-bar > span {
-    white-space: nowrap;
-    flex: 0 0 auto;
+  .selection-info {
+    font-size: 12.5px;
+  }
+
+  .selection-info > span {
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .selection-actions {
+    flex-wrap: nowrap;
+  }
+
+  .selection-actions .el-button {
+    min-height: 44px;
+    padding: 0 12px;
   }
 
   .selection-bar .spacer {

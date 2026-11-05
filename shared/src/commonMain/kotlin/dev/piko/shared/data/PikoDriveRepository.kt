@@ -1792,6 +1792,29 @@ open class PikoDriveRepository(
     }
 
     /**
+     * 回收站分页：`GET /drive/v1/files?parent_id=*` + `filters={"trashed":{"eq":true}}`。
+     * SDK 的 `listTrash` 只取一页（默认 100 条、不返回下一页令牌），这里走 `listFilesPaged`
+     * 才能拿到 `nextPageToken`。服务端不提供回收站总条数，也没有「原父目录名」，只有 parentId，
+     * 名字由调用方按 id 另查。按删除时间倒序（时间字段原样保留，可能是 ISO 也可能是毫秒）。
+     */
+    suspend fun listTrashPage(
+        pageToken: String = "",
+        pageSize: Int = TRASH_PAGE_SIZE,
+    ): Result<Pair<List<FileStat>, String>> = withContext(Dispatchers.Default) {
+        runSuspendCatching {
+            val page = client.listFilesPaged(
+                parentId = "*",
+                pageSize = pageSize,
+                pageToken = pageToken,
+                extraFilters = mapOf(FileFilter.trashed(true)),
+            )
+            page.files.sortedWith(
+                compareByDescending<FileStat> { it.deleteTime.orEmpty() }.thenBy { it.name.lowercase() },
+            ) to page.nextPageToken
+        }
+    }
+
+    /**
      * 列出目录下的全部条目，翻页由 SDK 负责。
      *
      * 按页取有两处坑：只取第一页会让超过一页的目录被静默截断；排序又发生在
@@ -3598,6 +3621,8 @@ open class PikoDriveRepository(
         // 目录图、›、补全直接用最近列过的而不重取的期限。网盘页不看它：网盘页总是先显示缓存、随即刷新
         private val RECENT_LISTING_FRESH = 60.seconds
         private val TRASH_CACHE_FRESH = 300.seconds
+        /** 回收站每页条数；SDK 只透传 pageSize，翻页令牌由响应带回。 */
+        private const val TRASH_PAGE_SIZE = 100
 
         // 登录后让首屏列根目录与会话恢复先行，再在后台拉齐整棵本地文件树
         private val TREE_WARMUP_DELAY = 1500.milliseconds

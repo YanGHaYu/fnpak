@@ -6,6 +6,7 @@ import dev.piko.server.ServiceGraph
 import dev.piko.server.TaskProgressEvent
 import dev.piko.server.TaskRemovedEvent
 import dev.piko.server.download.downloadGroups
+import dev.piko.server.download.effectiveGroupId
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respondTextWriter
@@ -75,6 +76,9 @@ private suspend fun streamDownloads(graph: ServiceGraph, out: SendChannel<String
                 percent = (task.progress.toDouble() * 1000).roundToLong() / 10.0,
                 speedBytesPerSec = task.speedBytesPerSec,
                 status = task.status.name,
+                fileId = task.fileId,
+                parentTaskId = task.parentTaskId,
+                groupId = task.effectiveGroupId(),
                 segments = task.segments,
             )
             out.send("event: download.progress\ndata: ${json.encodeToString(event)}\n\n")

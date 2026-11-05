@@ -72,7 +72,6 @@
                 <div class="toolbar">
                   <el-button size="small" :disabled="crumbs.length === 1" @click="up">上一级</el-button>
                   <el-button size="small" :loading="listBusy" @click="loadList">刷新</el-button>
-                  <el-button size="small" text @click="logout">退出登录</el-button>
                 </div>
               </div>
             </template>
@@ -103,8 +102,10 @@
               <el-table-column type="selection" width="44" :selectable="selectableRow" />
               <el-table-column prop="name" label="名称" min-width="230">
                 <template #default="{ row }">
-                  <span :class="{ mono: !row.isFolder }">{{ row.name || row.id }}</span>
-                  <el-tag v-if="row.isFolder" size="small" type="info" effect="plain" style="margin-left: 6px">目录</el-tag>
+                  <div class="name-cell">
+                    <span class="name-text" :class="{ mono: !row.isFolder }">{{ row.name || row.id }}</span>
+                    <el-tag v-if="row.isFolder" size="small" type="info" effect="plain">目录</el-tag>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="大小" width="110" align="right">
@@ -113,14 +114,14 @@
                 </template>
               </el-table-column>
               <el-table-column prop="mimeType" label="类型" width="130" show-overflow-tooltip />
-              <el-table-column label="操作" width="300" align="right">
+              <el-table-column label="操作" width="64" align="center" class-name="action-col">
                 <template #default="{ row }">
-                  <div class="row-actions" @click.stop>
-                    <el-button v-if="row.isVideo" size="small" @click="openPlayer(row)">播放</el-button>
-                    <el-button v-if="row.isFolder" size="small" type="primary" plain @click="downloadFolder(row)">下载文件夹</el-button>
-                    <el-button v-if="!row.isFolder" size="small" type="primary" plain @click="startDownload(row.id)">下载</el-button>
-                    <el-button size="small" text @click="openRename(row)">重命名</el-button>
-                  </div>
+                  <RowActionMenu
+                    trigger="hover"
+                    :label="row.name || row.id"
+                    :actions="driveActions(row)"
+                    @select="(key) => onDriveAction(row, key)"
+                  />
                 </template>
               </el-table-column>
             </el-table>
@@ -128,10 +129,18 @@
             <!-- 窄屏降级：同一份数据渲染成卡片列表，勾选仍写回 el-table 的选中态 -->
             <div class="mobile-only mobile-toolbar">
               <el-button size="small" @click="toggleAllDrive">{{ allDriveSelected ? '取消全选' : '全选' }}</el-button>
-              <span class="muted">已选 {{ driveSelection.length }} 项</span>
             </div>
             <div class="mobile-only card-list">
               <el-card v-for="row in items" :key="row.id" shadow="never" class="row-card">
+                <div class="row-card-action">
+                  <RowActionMenu
+                    trigger="click"
+                    placement="bottom-end"
+                    :label="row.name || row.id"
+                    :actions="driveActions(row)"
+                    @select="(key) => onDriveAction(row, key)"
+                  />
+                </div>
                 <div class="row-card-main">
                   <el-checkbox
                     class="row-check"
@@ -150,37 +159,50 @@
                     </div>
                   </div>
                 </div>
-                <div class="card-actions" @click.stop>
-                  <el-button v-if="row.isVideo" size="small" @click="openPlayer(row)">播放</el-button>
-                  <el-button v-if="row.isFolder" size="small" type="primary" plain @click="downloadFolder(row)">下载文件夹</el-button>
-                  <el-button v-if="!row.isFolder" size="small" type="primary" plain @click="startDownload(row.id)">下载</el-button>
-                  <el-button size="small" text @click="openRename(row)">重命名</el-button>
-                </div>
               </el-card>
               <p v-if="!items.length" class="hint">这个目录是空的</p>
             </div>
 
-            <!-- 多选操作条：文件与文件夹可同时选中，下载时合并成一个批次 -->
+            <!-- 多选操作条：文案一行、按钮一行；行内操作只作用于当前行，批量只作用于选中集合 -->
             <div v-if="driveSelection.length" class="selection-bar">
-              <span>
-                已选 <b>{{ driveSelection.length }}</b> 项，其中
-                <b>{{ folderSelectionCount }}</b> 个文件夹、<b>{{ fileSelectionCount }}</b> 个文件
-              </span>
-              <span class="muted">
-                文件 {{ formatSize(selectedBytes) || '0 B' }}
-                <template v-if="folderSelectionCount">；文件夹大小待扫描</template>
-              </span>
-              <div class="spacer" />
-              <el-button size="small" @click="clearDriveSelection">取消</el-button>
-              <el-button
-                size="small"
-                :disabled="driveSelection.length !== 1"
-                @click="openRename(driveSelection[0])"
-              >重命名</el-button>
-              <el-button size="small" @click="openTargetDialog('move')">移动</el-button>
-              <el-button size="small" @click="openTargetDialog('copy')">复制</el-button>
-              <el-button size="small" type="danger" plain @click="deleteCloud">移入回收站</el-button>
-              <el-button size="small" type="primary" :loading="batchBusy" @click="downloadSelected">下载</el-button>
+              <div class="selection-info">
+                <span>
+                  已选 <b>{{ driveSelection.length }}</b> 项，其中
+                  <b>{{ folderSelectionCount }}</b> 个文件夹、<b>{{ fileSelectionCount }}</b> 个文件
+                </span>
+                <span class="muted">
+                  文件 {{ formatSize(selectedBytes) || '0 B' }}
+                  <template v-if="folderSelectionCount">；文件夹大小待扫描</template>
+                </span>
+              </div>
+              <div class="selection-actions">
+                <el-button size="small" type="primary" :loading="batchBusy" @click="downloadSelected">下载</el-button>
+                <el-button size="small" type="danger" plain @click="deleteCloud(driveSelection)">移入回收站</el-button>
+                <el-button size="small" @click="clearDriveSelection">取消选择</el-button>
+                <el-popover
+                  v-model:visible="batchMoreOpen"
+                  trigger="click"
+                  placement="top-end"
+                  :width="196"
+                  :teleported="true"
+                  :persistent="false"
+                  popper-class="row-action-popper"
+                >
+                  <template #reference>
+                    <el-button size="small">更多</el-button>
+                  </template>
+                  <div class="row-menu" role="menu">
+                    <button type="button" role="menuitem" class="row-menu-item" @click="batchMoveCopy('move')">
+                      <el-icon class="row-menu-icon"><Rank /></el-icon>
+                      <span>移动到</span>
+                    </button>
+                    <button type="button" role="menuitem" class="row-menu-item" @click="batchMoveCopy('copy')">
+                      <el-icon class="row-menu-icon"><CopyDocument /></el-icon>
+                      <span>复制到</span>
+                    </button>
+                  </div>
+                </el-popover>
+              </div>
             </div>
             <p class="hint" style="margin: 8px 0 0">
               {{ listHint }}
@@ -227,15 +249,6 @@
                 <span class="title">本机下载</span>
                 <span class="muted">{{ groups.length }} 个父任务 · {{ downloads.length }} 个子项</span>
                 <div class="spacer" />
-                <el-button
-                  size="small"
-                  type="danger"
-                  plain
-                  :disabled="!groupSelection.length"
-                  @click="deleteRecords(groupSelection)"
-                >
-                  删除选中 {{ groupSelection.length }} 项
-                </el-button>
                 <el-button size="small" @click="loadDownloads">刷新</el-button>
               </div>
             </template>
@@ -248,12 +261,18 @@
               row-key="id"
               empty-text="还没有下载任务"
               @selection-change="onGroupSelection"
+              @expand-change="onGroupExpand"
             >
               <el-table-column type="selection" width="44" />
               <el-table-column type="expand">
                 <template #default="{ row }">
+                  <!-- 子项数以「GET /api/downloads 的 items 全量」为准；SSE 只更新单条，不当全量用 -->
                   <div class="children" v-if="childrenOf(row).length">
-                    <el-table :data="childrenOf(row)" size="small">
+                    <div class="children-head">
+                      <span>共 {{ childTotal(row) }} 项，显示 {{ childrenOf(row).length }} 项</span>
+                      <span v-if="childTotal(row) > childrenOf(row).length" class="muted">正在补全子项…</span>
+                    </div>
+                    <el-table :data="childrenOf(row)" size="small" max-height="420">
                       <el-table-column prop="fileName" label="子项（相对路径已还原）" min-width="260" show-overflow-tooltip />
                       <el-table-column label="进度" min-width="180">
                         <template #default="{ row: child }">
@@ -265,7 +284,13 @@
                           <span class="num">{{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}</span>
                         </template>
                       </el-table-column>
-                      <el-table-column prop="status" label="状态" width="120" />
+                      <el-table-column label="状态" width="130">
+                        <template #default="{ row: child }">
+                          <el-tag size="small" :type="statusType(child.status)" effect="plain">
+                            {{ childStatusText(child.status) }} · {{ Number(child.percent) || 0 }}%
+                          </el-tag>
+                        </template>
+                      </el-table-column>
                     </el-table>
                   </div>
                   <p v-else class="hint" style="padding: 6px 12px">子项还在扫描或入队中…</p>
@@ -273,8 +298,10 @@
               </el-table-column>
               <el-table-column label="任务" min-width="230">
                 <template #default="{ row }">
-                  <span>{{ row.name }}</span>
-                  <el-tag size="small" effect="plain" type="info" style="margin-left: 6px">{{ kindText(row.kind) }}</el-tag>
+                  <div class="name-cell">
+                    <span class="name-text">{{ row.name }}</span>
+                    <el-tag size="small" effect="plain" type="info">{{ kindText(row.kind) }}</el-tag>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="进度（总字节汇总）" min-width="250">
@@ -307,44 +334,32 @@
                   <div v-if="row.error" class="error-line">{{ row.error }}</div>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="220" align="right">
+              <el-table-column label="操作" width="64" align="center" class-name="action-col">
                 <template #default="{ row }">
-                  <div class="row-actions">
-                    <el-button
-                      v-if="isTerminal(row.status)"
-                      size="small"
-                      type="danger"
-                      plain
-                      @click="deleteRecords([row])"
-                    >删除任务</el-button>
-                    <template v-else>
-                      <el-button size="small" :disabled="!canPause(row)" @click="groupAction(row, 'pause')">暂停</el-button>
-                      <el-button
-                        size="small"
-                        type="primary"
-                        plain
-                        :disabled="!canResume(row)"
-                        @click="groupAction(row, 'resume')"
-                      >继续</el-button>
-                      <el-button
-                        size="small"
-                        type="danger"
-                        plain
-                        :disabled="!canPause(row)"
-                        @click="groupAction(row, 'cancel')"
-                      >取消</el-button>
-                    </template>
-                  </div>
+                  <RowActionMenu
+                    trigger="hover"
+                    :label="row.name"
+                    :actions="groupActions(row)"
+                    @select="(key) => onGroupAction(row, key)"
+                  />
                 </template>
               </el-table-column>
             </el-table>
 
             <div class="mobile-only mobile-toolbar">
               <el-button size="small" @click="toggleAllGroups">{{ allGroupsSelected ? '取消全选' : '全选' }}</el-button>
-              <span class="muted">已选 {{ groupSelection.length }} 项</span>
             </div>
             <div class="mobile-only card-list">
               <el-card v-for="row in groups" :key="row.id" shadow="never" class="row-card">
+                <div class="row-card-action">
+                  <RowActionMenu
+                    trigger="click"
+                    placement="bottom-end"
+                    :label="row.name"
+                    :actions="groupActions(row)"
+                    @select="(key) => onGroupAction(row, key)"
+                  />
+                </div>
                 <div class="row-card-main">
                   <el-checkbox
                     class="row-check"
@@ -381,37 +396,18 @@
                     <div v-if="row.error" class="error-line">{{ row.error }}</div>
                   </div>
                 </div>
-                <div class="card-actions">
-                  <el-button
-                    v-if="isTerminal(row.status)"
-                    size="small"
-                    type="danger"
-                    plain
-                    @click="deleteRecords([row])"
-                  >删除任务</el-button>
-                  <template v-else>
-                    <el-button size="small" :disabled="!canPause(row)" @click="groupAction(row, 'pause')">暂停</el-button>
-                    <el-button
-                      size="small"
-                      type="primary"
-                      plain
-                      :disabled="!canResume(row)"
-                      @click="groupAction(row, 'resume')"
-                    >继续</el-button>
-                    <el-button
-                      size="small"
-                      type="danger"
-                      plain
-                      :disabled="!canPause(row)"
-                      @click="groupAction(row, 'cancel')"
-                    >取消</el-button>
-                  </template>
-                </div>
                 <div v-if="childrenOf(row).length" class="children-card">
-                  <div v-for="child in childrenOf(row)" :key="child.id" class="child-line">
-                    <span class="mono child-name">{{ child.fileName }}</span>
-                    <span class="muted">{{ child.status }}</span>
-                    <span class="num">{{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}</span>
+                  <div class="children-head">
+                    <span>共 {{ childTotal(row) }} 项，显示 {{ childrenOf(row).length }} 项</span>
+                  </div>
+                  <div class="children-scroll">
+                    <div v-for="child in childrenOf(row)" :key="child.id" class="child-line">
+                      <span class="mono child-name">{{ child.fileName }}</span>
+                      <el-tag size="small" :type="statusType(child.status)" effect="plain">
+                        {{ childStatusText(child.status) }} · {{ Number(child.percent) || 0 }}%
+                      </el-tag>
+                      <span class="num">{{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}</span>
+                    </div>
                   </div>
                 </div>
                 <p v-else-if="row.status === 'SCANNING'" class="hint" style="margin: 6px 0 0">子项还在扫描或入队中…</p>
@@ -420,10 +416,13 @@
             </div>
 
             <div v-if="groupSelection.length" class="selection-bar">
-              <span>已选 <b>{{ groupSelection.length }}</b> 项</span>
-              <div class="spacer" />
-              <el-button size="small" @click="clearGroupSelection">取消</el-button>
-              <el-button size="small" type="danger" @click="deleteRecords(groupSelection)">删除记录</el-button>
+              <div class="selection-info">
+                <span>已选 <b>{{ groupSelection.length }}</b> 项</span>
+              </div>
+              <div class="selection-actions">
+                <el-button size="small" type="danger" @click="deleteRecords(groupSelection)">删除记录</el-button>
+                <el-button size="small" @click="clearGroupSelection">取消选择</el-button>
+              </div>
             </div>
             <p v-if="downloadHint" class="hint" style="margin: 8px 0 0">{{ downloadHint }}</p>
           </el-card>
@@ -442,16 +441,6 @@
                 <span class="title">离线任务</span>
                 <span class="muted">{{ tasks.length }} 项</span>
                 <div class="spacer" />
-                <el-button
-                  size="small"
-                  type="danger"
-                  plain
-                  :disabled="!offlineSelection.length"
-                  :loading="deleteBusy"
-                  @click="deleteOffline(offlineSelection.map((row) => row.id))"
-                >
-                  删除选中 {{ offlineSelection.length }} 项
-                </el-button>
                 <el-button size="small" @click="loadTasks">刷新</el-button>
               </div>
             </template>
@@ -468,9 +457,11 @@
               <el-table-column type="selection" width="44" />
               <el-table-column label="名称" min-width="260">
                 <template #default="{ row }">
-                  <el-tooltip :content="`名称来源：${sourceText(row.nameSource)}`" placement="top">
-                    <span>{{ row.name || row.id }}</span>
-                  </el-tooltip>
+                  <div class="name-cell">
+                    <el-tooltip :content="`名称来源：${sourceText(row.nameSource)}`" placement="top">
+                      <span class="name-text">{{ row.name || row.id }}</span>
+                    </el-tooltip>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="类型" width="130">
@@ -493,19 +484,32 @@
               <el-table-column label="大小" width="110" align="right">
                 <template #default="{ row }"><span class="num">{{ formatSize(row.fileSize) || '—' }}</span></template>
               </el-table-column>
-              <el-table-column label="操作" width="90" align="right">
+              <el-table-column label="操作" width="64" align="center" class-name="action-col">
                 <template #default="{ row }">
-                  <el-button size="small" type="danger" plain :loading="deleteBusy" @click="deleteOffline([row.id])">删除</el-button>
+                  <RowActionMenu
+                    trigger="hover"
+                    :label="row.name || row.id"
+                    :actions="offlineActions()"
+                    @select="() => deleteOffline([row])"
+                  />
                 </template>
               </el-table-column>
             </el-table>
 
             <div class="mobile-only mobile-toolbar">
               <el-button size="small" @click="toggleAllOffline">{{ allOfflineSelected ? '取消全选' : '全选' }}</el-button>
-              <span class="muted">已选 {{ offlineSelection.length }} 项</span>
             </div>
             <div class="mobile-only card-list">
               <el-card v-for="row in tasks" :key="row.id" shadow="never" class="row-card">
+                <div class="row-card-action">
+                  <RowActionMenu
+                    trigger="click"
+                    placement="bottom-end"
+                    :label="row.name || row.id"
+                    :actions="offlineActions()"
+                    @select="() => deleteOffline([row])"
+                  />
+                </div>
                 <div class="row-card-main">
                   <el-checkbox
                     class="row-check"
@@ -529,23 +533,33 @@
                     </div>
                   </div>
                 </div>
-                <div class="card-actions">
-                  <el-button size="small" type="danger" plain :loading="deleteBusy" @click="deleteOffline([row.id])">删除</el-button>
-                </div>
               </el-card>
               <p v-if="!tasks.length" class="hint">没有离线任务</p>
             </div>
 
             <div v-if="offlineSelection.length" class="selection-bar">
-              <span>已选 <b>{{ offlineSelection.length }}</b> 项</span>
-              <div class="spacer" />
-              <el-button size="small" @click="clearOfflineSelection">取消</el-button>
-              <el-button size="small" type="danger" :loading="deleteBusy" @click="deleteOffline(offlineSelection.map((row) => row.id))">
-                删除
-              </el-button>
+              <div class="selection-info">
+                <span>已选 <b>{{ offlineSelection.length }}</b> 项</span>
+              </div>
+              <div class="selection-actions">
+                <el-button size="small" type="danger" :loading="deleteBusy" @click="deleteOffline(offlineSelection)">
+                  删除
+                </el-button>
+                <el-button size="small" @click="clearOfflineSelection">取消选择</el-button>
+              </div>
             </div>
             <p v-if="offlineHint" class="hint" style="margin: 8px 0 0">{{ offlineHint }}</p>
           </el-card>
+        </el-tab-pane>
+
+        <el-tab-pane name="trash">
+          <template #label>
+            <span class="tab-title">
+              回收站
+              <el-badge v-if="trashCount" :value="trashCount" class="tab-badge" />
+            </span>
+          </template>
+          <TrashView ref="trashRef" @count="trashCount = $event" />
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -579,7 +593,7 @@
         <DirTreePicker ref="treeRef" :node="targetTree" :selected-id="targetDialog.targetId" @select="onSelectTarget" />
       </div>
       <p class="hint" style="margin: 8px 0 0">
-        已选 {{ driveSelection.length }} 项；不能选择所选文件夹自身或其子目录。
+        本次目标：{{ targetDialog.label }}（{{ targetDialog.ids.length }} 项）；不能选择所选文件夹自身或其子目录。
         {{ targetDialog.mode === 'copy' ? '复制由 PikPak 服务端按任务执行，源文件保留。' : '' }}
       </p>
       <template #footer>
@@ -596,10 +610,17 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import DirTreePicker from '../components/DirTreePicker.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
+import RowActionMenu from '../components/RowActionMenu.vue'
+import TrashView from './TrashView.vue'
+import { CopyDocument, Rank } from '@element-plus/icons-vue'
 import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
 import { refreshAuth, state } from '../store'
+
+const route = useRoute()
+const router = useRouter()
 
 const loginTab = ref('password')
 const signin = reactive({ account: '', password: '' })
@@ -612,6 +633,10 @@ const tokenError = ref('')
 const tokenBusy = ref(false)
 
 const tab = ref('drive')
+const TRASH_TAB = 'trash'
+const VALID_TABS = ['drive', 'downloads', 'offline', TRASH_TAB]
+const trashCount = ref(0)
+const trashRef = ref(null)
 const crumbs = ref([{ id: '', name: '根目录' }])
 const items = ref([])
 const listStatus = ref('')
@@ -620,6 +645,7 @@ const listBusy = ref(false)
 const driveTable = ref(null)
 const driveSelection = ref([])
 const batchBusy = ref(false)
+const batchMoreOpen = ref(false)
 const currentParentId = computed(() => crumbs.value[crumbs.value.length - 1].id)
 const selectedBytes = computed(() =>
   driveSelection.value.filter((row) => !row.isFolder).reduce((sum, row) => sum + (row.sizeBytes || 0), 0),
@@ -632,6 +658,9 @@ const groups = ref([])
 const groupTable = ref(null)
 const groupSelection = ref([])
 const downloadHint = ref('')
+// 展开中的批次：全量刷新后按 row-key 重新展开，切 Tab 不丢
+const expandedGroupIds = new Set()
+let downloadsSyncTimer = null
 
 const tasks = ref([])
 const tasksTable = ref(null)
@@ -648,7 +677,7 @@ const renameError = computed(() => {
   if (name.includes('/') || name.includes('\\')) return '名称不能包含 / 或 \\'
   return ''
 })
-const targetDialog = reactive({ open: false, mode: 'move', targetId: '', pathLabel: '根目录', busy: false })
+const targetDialog = reactive({ open: false, mode: 'move', targetId: '', pathLabel: '根目录', busy: false, ids: [], label: '' })
 const targetTree = reactive({
   id: '',
   name: '根目录',
@@ -811,13 +840,6 @@ async function submitToken() {
   await loadAuth()
 }
 
-async function logout() {
-  await api('/api/auth/logout', { method: 'POST' })
-  crumbs.value = [{ id: '', name: '根目录' }]
-  clearDriveSelection()
-  await loadAuth()
-}
-
 async function loadAuth() {
   if (authTimer) {
     clearTimeout(authTimer)
@@ -923,12 +945,23 @@ function toggleAllOffline() {
 
 function upsert(list, row) {
   const index = list.findIndex((item) => item.id === row.id)
-  if (index < 0) list.push(row)
-  else list.splice(index, 1, row)
+  // SSE 增量只补齐变化字段，不能用事件 payload 整个替换：
+  // 事件里没有 groupId 等归属字段时，整替换会把已有快照的 groupId 抹掉，子项就从批次里“消失”。
+  if (index < 0) list.push({ ...row })
+  else list.splice(index, 1, { ...list[index], ...row })
 }
 
 function upsertGroup(group) {
-  upsert(groups.value, group)
+  const index = groups.value.findIndex((item) => item.id === group.id)
+  if (index < 0) groups.value.push({ ...group })
+  else groups.value.splice(index, 1, { ...groups.value[index], ...group })
+  // 汇总里的 childCount 比当前已归组的子项多，说明本地快照落后：拉一次全量，SSE 不当全量集合
+  if (number(group.childCount) > childrenOf(group).length) scheduleDownloadsSync()
+}
+
+function number(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function applyItemToGroup(item) {
@@ -937,7 +970,7 @@ function applyItemToGroup(item) {
   const children = downloads.value.filter((row) => row.groupId === group.id)
   const total = children.reduce((sum, row) => sum + (row.bytesTotal || 0), 0)
   const done = children.reduce((sum, row) => sum + (row.bytesDone || 0), 0)
-  group.childCount = children.length
+  group.childCount = Math.max(number(group.childCount), children.length)
   group.completedCount = children.filter((row) => row.status === 'COMPLETED').length
   group.bytesTotal = total
   group.bytesDone = done
@@ -945,8 +978,50 @@ function applyItemToGroup(item) {
   group.speedBytesPerSec = children.reduce((sum, row) => sum + (row.speedBytesPerSec || 0), 0)
 }
 
+/**
+ * 子项唯一来源是 `GET /api/downloads` 的 `items`：按 groupId 归组。
+ * SSE `download.progress` 只按 id 合并单条，缺失分组字段时回退 parentTaskId。
+ */
 function childrenOf(group) {
-  return downloads.value.filter((row) => row.groupId === group.id)
+  return downloads.value.filter((row) =>
+    row.groupId ? row.groupId === group.id : row.parentTaskId === group.id,
+  )
+}
+
+function childTotal(group) {
+  return Math.max(number(group.childCount), childrenOf(group).length)
+}
+
+function childStatusText(status) {
+  return (
+    {
+      PENDING: '等待中',
+      QUEUED: '排队中',
+      DOWNLOADING: '下载中',
+      COMPLETED: '已完成',
+      PAUSED: '已暂停',
+      FAILED: '失败',
+      CANCELLED: '已取消',
+    }[status] || status || '—'
+  )
+}
+
+/** 展开时兜底拉一次全量；刷新后按 id 恢复展开状态，避免“展开 → 重新拉 → 自动收起”。 */
+function onGroupExpand(row, expandedRows) {
+  const expanded = Array.isArray(expandedRows)
+    ? expandedRows.some((item) => item.id === row.id)
+    : Boolean(expandedRows)
+  if (expanded) expandedGroupIds.add(row.id)
+  else expandedGroupIds.delete(row.id)
+  if (expanded && childrenOf(row).length < number(row.childCount)) scheduleDownloadsSync(300)
+}
+
+function scheduleDownloadsSync(delay = 1500) {
+  if (downloadsSyncTimer) return
+  downloadsSyncTimer = setTimeout(async () => {
+    downloadsSyncTimer = null
+    if (state.auth.authenticated === true) await loadDownloads()
+  }, delay)
 }
 
 async function loadDownloads() {
@@ -958,6 +1033,15 @@ async function loadDownloads() {
   downloads.value = result.data?.items || []
   groups.value = result.data?.groups || []
   downloadHint.value = ''
+  // 保留展开状态
+  if (expandedGroupIds.size) {
+    await nextTick()
+    for (const id of expandedGroupIds) {
+      const target = groups.value.find((row) => row.id === id)
+      if (!target) continue
+      groupTable.value?.toggleRowExpansion(target, true)
+    }
+  }
 }
 
 async function downloadSelected() {
@@ -1011,7 +1095,7 @@ async function groupAction(group, action) {
   if (action === 'cancel') {
     try {
       await ElMessageBox.confirm(
-        '停止这个父任务的全部下载。已经下载完成的文件会保留在本地，不会被删除。',
+        `停止「${group.name || group.id}」这个父任务的全部下载。已经下载完成的文件会保留在本地，不会被删除。`,
         '取消下载',
         { type: 'warning', confirmButtonText: '停止', cancelButtonText: '继续下载' },
       )
@@ -1034,9 +1118,12 @@ async function deleteRecords(rows) {
   if (!ids.length) return
   const paths = rows.map((row) => row.path).filter(Boolean)
   const detail = paths.length ? `\n本地文件将保留在：${paths.slice(0, 3).join('、')}${paths.length > 3 ? ' 等' : ''}` : ''
+  const title = rows.length === 1
+    ? `删除任务「${rows[0].name || rows[0].id}」的记录？`
+    : `删除这 ${ids.length} 个任务的记录？`
   try {
     await ElMessageBox.confirm(
-      `将删除 ${ids.length} 个任务记录；只删任务记录与进度，不动磁盘上的文件。` +
+      `${title}\n只删任务记录与进度，不动磁盘上的文件。` +
         '正在下载的任务会先停止，已写入的分块/临时文件也会保留。' +
         detail,
       '删除下载任务记录',
@@ -1087,11 +1174,15 @@ function clearOfflineSelection() {
   offlineSelection.value = []
 }
 
-async function deleteOffline(ids) {
+async function deleteOffline(rows) {
+  const ids = rows.map((row) => row.id)
   if (!ids.length || deleteBusy.value) return
+  const title = rows.length === 1
+    ? `删除离线任务「${rows[0].name || rows[0].id}」？`
+    : `删除这 ${ids.length} 个离线任务？`
   try {
     await ElMessageBox.confirm(
-      `将删除 ${ids.length} 个离线任务记录；仅删除任务，不会删除云端已完成的文件。`,
+      `${title}\n仅删除任务，不会删除云端已完成的文件。`,
       '删除离线任务',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -1117,14 +1208,69 @@ async function deleteOffline(ids) {
     : `已删除 ${deleted.length} 个任务；云端文件未删除`
 }
 
-async function deleteCloud() {
-  const rows = driveSelection.value.slice()
-  if (!rows.length) return
-  const folders = rows.filter((row) => row.isFolder).length
+/**
+ * 行内操作只作用于当前这一行：所有 handler 都接收 row，绝不读取选中集合。
+ * label 里带名称，浮层标题与触发按钮 title 都能看出操作对象。
+ */
+function driveActions(row) {
+  const actions = []
+  if (row.isVideo) actions.push({ key: 'play', label: '播放', icon: 'play', hint: `播放「${row.name || row.id}」` })
+  if (row.isFolder) {
+    actions.push({ key: 'download-folder', label: '下载文件夹', icon: 'folder', hint: '递归下载整个文件夹' })
+  } else {
+    actions.push({ key: 'download', label: '下载', icon: 'download', hint: `下载「${row.name || row.id}」到本机` })
+  }
+  actions.push({ key: 'rename', label: '重命名', icon: 'rename', hint: '只重命名这一项' })
+  actions.push({ key: 'move', label: '移动', icon: 'move', hint: '把这一项移到其他目录' })
+  actions.push({ key: 'copy', label: '复制', icon: 'copy', hint: '把这一项复制到其他目录，源文件保留' })
+  actions.push({ key: 'delete', label: '删除', icon: 'delete', danger: true, hint: '移入回收站，可恢复' })
+  return actions
+}
+
+async function onDriveAction(row, key) {
+  if (key === 'play') return openPlayer(row)
+  if (key === 'download-folder') return downloadFolder(row)
+  if (key === 'download') return startDownload(row.id)
+  if (key === 'rename') return openRename(row)
+  if (key === 'move' || key === 'copy') return openTargetDialog(key, [row])
+  if (key === 'delete') return deleteCloud([row])
+}
+
+function groupActions(row) {
+  if (isTerminal(row.status)) {
+    return [{ key: 'delete-record', label: '删除任务', icon: 'delete', danger: true, hint: '只删任务记录，本地文件保留' }]
+  }
+  return [
+    { key: 'pause', label: '暂停', icon: 'pause', disabled: !canPause(row), hint: '暂停这个父任务的全部子项' },
+    { key: 'resume', label: '继续', icon: 'resume', disabled: !canResume(row), hint: '继续下载这个父任务' },
+    { key: 'cancel', label: '取消', icon: 'cancel', danger: true, disabled: !canPause(row), hint: '停止这个父任务，已下载文件保留' },
+    { key: 'delete-record', label: '删除任务', icon: 'delete', danger: true, hint: '停止并删除任务记录，本地文件保留' },
+  ]
+}
+
+function onGroupAction(row, key) {
+  if (key === 'delete-record') return deleteRecords([row])
+  return groupAction(row, key)
+}
+
+function offlineActions() {
+  return [{ key: 'delete-task', label: '删除任务', icon: 'delete', danger: true, hint: '只删离线任务，不动云端文件' }]
+}
+
+async function deleteCloud(rows = driveSelection.value) {
+  const targets = rows.slice()
+  if (!targets.length) return
+  const folders = targets.filter((row) => row.isFolder).length
+  const names = targets.map((row) => `「${row.name || row.id}」`)
+  const title = targets.length === 1 ? `将${names[0]}移入回收站？` : `将这 ${targets.length} 项移入回收站？`
+  const listed = targets.length > 1
+    ? `\n${names.slice(0, 3).join('、')}${names.length > 3 ? ' 等' : ''}`
+    : ''
   try {
     await ElMessageBox.confirm(
-      `将删除 ${rows.length} 项${folders ? `（含 ${folders} 个文件夹）` : ''}。` +
-        '文件夹会连同其中内容一起移入回收站；可在回收站恢复，不是永久删除。',
+      title + listed +
+        `\n${folders ? `其中 ${folders} 个文件夹会连同内容一起移入回收站；` : ''}` +
+        '可在回收站恢复，不是永久删除。',
       '删除云端内容',
       { type: 'warning', confirmButtonText: '移入回收站', cancelButtonText: '取消' },
     )
@@ -1133,7 +1279,7 @@ async function deleteCloud() {
   }
   const result = await api('/api/drive/trash', {
     method: 'POST',
-    body: JSON.stringify({ ids: rows.map((row) => row.id) }),
+    body: JSON.stringify({ ids: targets.map((row) => row.id) }),
   })
   if (!result.ok) {
     listStatus.value = errorDetail(result)
@@ -1177,9 +1323,11 @@ async function submitRename() {
   listStatus.value = `已重命名为「${result.data?.name || name}」`
 }
 
-async function openTargetDialog(mode) {
-  if (!driveSelection.value.length) return
+async function openTargetDialog(mode, rows = driveSelection.value) {
+  if (!rows.length) return
   targetDialog.mode = mode
+  targetDialog.ids = rows.map((row) => row.id)
+  targetDialog.label = rows.length === 1 ? rows[0].name || rows[0].id : `已选 ${rows.length} 项`
   targetDialog.targetId = ''
   targetDialog.pathLabel = '根目录'
   targetDialog.busy = false
@@ -1204,9 +1352,15 @@ function onSelectTarget(node) {
   targetDialog.pathLabel = node.path.length ? node.path.join(' / ') : '根目录'
 }
 
+/** 批量「更多」菜单：多选下不提供重命名，只放移动/复制这类次要操作。 */
+function batchMoveCopy(mode) {
+  batchMoreOpen.value = false
+  openTargetDialog(mode, driveSelection.value)
+}
+
 async function submitMoveCopy() {
   if (targetDialog.busy) return
-  const ids = driveSelection.value.map((row) => row.id)
+  const ids = targetDialog.ids.slice()
   if (!ids.length) return
   targetDialog.busy = true
   const result = await api(`/api/drive/${targetDialog.mode}`, {
@@ -1355,13 +1509,42 @@ function closeEvents() {
   }
 }
 
-// 三个 Tab 各自记住滚动位置；切换只改显示，不重建组件
+// Tab 与地址栏双向同步：`/trash` 深链直接进回收站；其它 Tab 用 `?tab=` 持久化，刷新后停在原 Tab
+function tabFromRoute() {
+  if (route.path === '/trash') return TRASH_TAB
+  const query = String(route.query.tab || '')
+  return VALID_TABS.includes(query) ? query : 'drive'
+}
+
+function syncRouteForTab(next) {
+  if (next === TRASH_TAB) {
+    if (route.path !== '/trash') router.replace({ path: '/trash' })
+    return
+  }
+  const targetQuery = next === 'drive' ? '' : next
+  const currentQuery = route.path === '/' ? String(route.query.tab || '') : ''
+  if (route.path === '/' && currentQuery === targetQuery) return
+  router.replace({ path: '/', query: next === 'drive' ? {} : { tab: next } })
+}
+
+// 四个 Tab 各自记住滚动位置；切换只改显示，不重建组件
 watch(tab, (next, previous) => {
   if (previous) scrollByTab[previous] = window.scrollY
+  syncRouteForTab(next)
+  if (next === 'downloads') loadDownloads()
+  if (next === TRASH_TAB) trashRef.value?.load?.()
   nextTick(() => {
     window.scrollTo({ top: scrollByTab[next] || 0 })
   })
 })
+
+watch(
+  () => route.fullPath,
+  () => {
+    const next = tabFromRoute()
+    if (next !== tab.value) tab.value = next
+  },
+)
 
 watch(
   () => state.auth.authenticated,
@@ -1370,10 +1553,14 @@ watch(
   },
 )
 
-onMounted(loadAuth)
+onMounted(async () => {
+  tab.value = tabFromRoute()
+  await loadAuth()
+})
 onUnmounted(() => {
   closeEvents()
   if (authTimer) clearTimeout(authTimer)
   if (tasksRefreshTimer) clearTimeout(tasksRefreshTimer)
+  if (downloadsSyncTimer) clearTimeout(downloadsSyncTimer)
 })
 </script>

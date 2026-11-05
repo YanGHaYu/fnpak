@@ -13,6 +13,11 @@ import dev.piko.server.MoveCopyResponse
 import dev.piko.server.RenameFileRequest
 import dev.piko.server.RenameFileResponse
 import dev.piko.server.ServiceGraph
+import dev.piko.server.TrashActionRequest
+import dev.piko.server.TrashActionResult
+import dev.piko.server.TrashActionResponse
+import dev.piko.server.TrashItem
+import dev.piko.server.TrashListResponse
 import dev.piko.server.respondError
 import dev.piko.shared.data.PikoFileSortOrder
 import io.github.nihildigit.pikpak.FileDetail
@@ -25,6 +30,9 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 /**
  * 云盘只读路由。全部直接走 `PikoDriveRepository`，不经过 `:ui` 的 `*State`：
@@ -188,6 +196,59 @@ fun Route.driveRoutes(graph: ServiceGraph) {
             )
         }
 
+        /**
+         * 回收站列表：SDK `listFilesPaged(parentId = "*", filters = {trashed: {eq: true}})`，
+         * 走 `GET /drive/v1/files`，响应带 `nextPageToken`，可以翻页。
+         * 服务端只给 parentId，不给原父目录名：这里按唯一 parentId 并发补查（上限 20 个），
+         * 查不到就留空，前端显示「原位置不可用」。
+         */
+        get("/trash/list") {
+            if (graph.requireLogin(call)) return@get
+            val pageToken = call.request.queryParameters["pageToken"].orEmpty()
+            graph.driveRepository.listTrashPage(pageToken).fold(
+                onSuccess = { (files, nextPageToken) ->
+                    val names = resolveParentNames(graph, files)
+                    call.respond(
+                        TrashListResponse(
+                            items = files.map { it.toTrashItem(names[it.parentId]) },
+                            nextPageToken = nextPageToken,
+                            pageSize = files.size,
+                        ),
+                    )
+                },
+                onFailure = { call.respondError(HttpStatusCode.BadGateway, "trash_list_failed", failureMessage(it)) },
+            )
+        }
+
+        /**
+         * 恢复：SDK `batchUntrash` → `POST /drive/v1/files:batchUntrash`，同步返回、无任务 ID。
+         * 恢复文件夹时服务端按整棵子树恢复（回收站保留原层级，恢复即把该文件夹及其内容一起放回原父目录）。
+         * 逐项调用并逐项返回，失败项留在回收站列表里。
+         */
+        post("/trash/restore") {
+            if (graph.requireLogin(call)) return@post
+            val ids = trashIds(call) ?: return@post
+            call.respond(
+                runTrashAction("restore", ids, "恢复项仍留在回收站") { id ->
+                    graph.driveRepository.restore(listOf(id))
+                },
+            )
+        }
+
+        /**
+         * 彻底删除：SDK `batchDelete` → `POST /drive/v1/files:batchDelete`，**永久删除、不可恢复**。
+         * 与上方的 `POST /api/drive/trash`（移入回收站）是两回事，前端文案必须写「彻底删除后不可恢复」。
+         */
+        post("/trash/delete") {
+            if (graph.requireLogin(call)) return@post
+            val ids = trashIds(call) ?: return@post
+            call.respond(
+                runTrashAction("delete", ids, "失败项仍留在回收站") { id ->
+                    graph.driveRepository.delete(listOf(id))
+                },
+            )
+        }
+
         /** 查询复制/解压等云端 drive 任务的进度。 */
         get("/tasks/{taskId}") {
             if (graph.requireLogin(call)) return@get
@@ -256,6 +317,65 @@ private suspend fun validateTarget(graph: ServiceGraph, ids: List<String>, targe
 }
 
 private const val MAX_TARGET_DEPTH = 64
+
+/** 回收站每条最多补查多少个唯一父目录名：避免一页 100 条都散落在不同目录时打爆请求数。 */
+private const val MAX_PARENT_NAME_LOOKUPS = 20
+
+private suspend fun trashIds(call: io.ktor.server.application.ApplicationCall): List<String>? {
+    val ids = runCatching { call.receive<TrashActionRequest>() }.getOrNull()
+        ?.ids?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinct().orEmpty()
+    if (ids.isEmpty()) {
+        call.respondError(HttpStatusCode.BadRequest, "missing_ids", "ids 不能为空")
+        return null
+    }
+    return ids
+}
+
+/** 逐项执行、逐项返回：一项失败不影响其他项，也不会整批回滚。 */
+private suspend fun runTrashAction(
+    action: String,
+    ids: List<String>,
+    note: String,
+    op: suspend (String) -> Result<Unit>,
+): TrashActionResponse {
+    val items = ids.map { id ->
+        op(id).fold(
+            onSuccess = { TrashActionResult(id, ok = true) },
+            onFailure = { TrashActionResult(id, ok = false, message = failureMessage(it)) },
+        )
+    }
+    val succeeded = items.count { it.ok }
+    return TrashActionResponse(
+        action = action,
+        items = items,
+        succeeded = succeeded,
+        failed = items.size - succeeded,
+        note = note,
+    )
+}
+
+/** parentId → 名称；根目录用固定文案，查不到的父目录留空。 */
+private suspend fun resolveParentNames(graph: ServiceGraph, files: List<FileStat>): Map<String, String> = coroutineScope {
+    val ids = files.map { it.parentId }.filter { it.isNotEmpty() }.distinct().take(MAX_PARENT_NAME_LOOKUPS)
+    val resolved = ids.map { id ->
+        async { id to graph.driveRepository.getFileDetail(id).getOrNull()?.name }
+    }.awaitAll()
+    buildMap {
+        put("", "根目录")
+        resolved.forEach { (id, name) -> if (name != null) put(id, name) }
+    }
+}
+
+private fun FileStat.toTrashItem(parentName: String?): TrashItem = TrashItem(
+    id = id,
+    name = name,
+    kind = kind,
+    isFolder = isFolder,
+    sizeBytes = sizeBytes,
+    parentId = parentId,
+    parentName = parentName,
+    deleteTime = deleteTime,
+)
 
 private fun FileStat.toItem(): FileItem {
     // 时长放在 params["duration"]（秒）；SDK 2.5.0 没有 durationMillis 属性
