@@ -1,0 +1,28 @@
+# NOTICE
+
+FNPak — PikPak 第三方 NAS 客户端 · 非官方
+
+## 版权
+
+- 上游项目：Piko，Copyright (C) NihilDigit，以 AGPL-3.0-or-later 授权
+  <https://github.com/NihilDigit/piko>
+- 本 fork（FNPak）新增与修改部分：Copyright (C) 2026 YanGHaYu
+
+本程序整体以 GNU Affero General Public License v3.0 or later 分发，完整文本见 `LICENSE`。
+本程序基于上游 Piko；上游版权与许可证声明保持不变。
+
+## 修改模块（相对上游）
+
+- `server/`：新增无头 HTTP 服务端（Ktor）、访问口令、设置、下载/离线任务/回收站 API、SSE
+- `web-ui/`：新增 Vue 3 + Element Plus 前端（构建产物提交在 `server/src/main/resources/web/`）
+- `shared/`：分段下载器（`SegmentDownloader`）与相关模型调整
+- `fnos/`：fnOS fpk 打包骨架（manifest、cmd 生命周期脚本、config、UI 配置、图标）
+- `scripts/`：fpk 构建与校验脚本
+- `docs/`：服务端与构建文档
+
+## 说明
+
+- **内部 Kotlin 包名 `dev.piko.*` 沿用上游**，不随产品更名而调整；这是为了避免破坏与上游的同步与合并，不代表与上游存在隶属或背书关系。
+- fnOS fpk 的目录结构与 manifest 字段依据飞牛官方打包规范编写；仓库内**未包含**官方示例代码。
+- 图标为自绘中性设计（深色圆角底 + 白色 FN + 向下箭头），不含 PikPak / 飞牛 / Piko 的商标或素材。
+- 本项目为非官方社区项目，与 NihilDigit/Piko、PikPak、飞牛 fnOS 官方均无关联。

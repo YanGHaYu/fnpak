@@ -1,117 +1,120 @@
-<p align="right"><b>简体中文</b> | <a href="README.zh-Hant.md">繁體中文</a> | <a href="README.ko.md">한국어</a> | <a href="README.ja.md">日本語</a> | <a href="README.en.md">English</a></p>
+# FNPak
 
-<p align="center"><img src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/icon.png" alt="Piko" width="96"></p>
+**PikPak 第三方 NAS 客户端 · 非官方**
 
-<h1 align="center">Piko</h1>
+> **非官方声明**：FNPak 是非官方社区项目，与 NihilDigit/Piko、PikPak、飞牛 fnOS 官方均无关联，也未获得其背书或授权。本项目不包含 PikPak 或飞牛的商标素材。
+>
+> 本项目基于 [NihilDigit/piko](https://github.com/NihilDigit/piko)（AGPL-3.0-or-later）开发，内部 Kotlin 包名 `dev.piko.*` 沿用上游以降低同步冲突。
 
-<p align="center">
-<a href="#安装"><img alt="Android 8.0+" src="https://img.shields.io/badge/Android-8.0%2B-306EFF?style=flat-square&logo=android&logoColor=white"></a>
-<a href="#安装"><img alt="Windows 10+ x64" src="https://img.shields.io/badge/Windows-10%2B%20x64-306EFF?style=flat-square&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0yIDJoOS41djkuNUgyek0xMi41IDJIMjJ2OS41aC05LjV6TTIgMTIuNWg5LjVWMjJIMnpNMTIuNSAxMi41SDIyVjIyaC05LjV6Ii8+PC9zdmc+"></a>
-<a href="#安装"><img alt="Windows 11+ arm64" src="https://img.shields.io/badge/Windows-11%2B%20arm64-306EFF?style=flat-square&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0yIDJoOS41djkuNUgyek0xMi41IDJIMjJ2OS41aC05LjV6TTIgMTIuNWg5LjVWMjJIMnpNMTIuNSAxMi41SDIyVjIyaC05LjV6Ii8+PC9zdmc+"></a>
-<a href="#安装"><img alt="macOS 12+ arm64" src="https://img.shields.io/badge/macOS-12%2B%20arm64-306EFF?style=flat-square&logo=apple&logoColor=white"></a>
-<a href="#安装"><img alt="Linux x64" src="https://img.shields.io/badge/Linux-x64-306EFF?style=flat-square&logo=linux&logoColor=white"></a>
-<br>
-<a href="https://github.com/NihilDigit/piko/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/NihilDigit/piko?style=flat-square&color=306EFF&label=Release&logo=github&logoColor=white"></a>
-<a href="https://github.com/NihilDigit/piko/attestations"><img alt="SLSA Build L3" src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/badges/slsa-l3.svg"></a>
-<a href="LICENSE"><img alt="License AGPL-3.0-or-later" src="https://img.shields.io/badge/License-AGPL--3.0--or--later-306EFF?style=flat-square&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xIDIxdi0yaDEwVjcuODI1UTEwLjM1IDcuNiA5Ljg3NSA3LjEyNVQ5LjE3NSA2SDZsMyA3cTAgMS4yNS0xLjAyNSAyLjEyNVQ1LjUgMTZxLTEuNDUgMC0yLjQ3NS0uODc1VDIgMTNsMy03SDNWNGg2LjE3NXEuMy0uODc1IDEuMDc1LTEuNDM3VDEyIDJxLjk3NSAwIDEuNzUuNTYzVDE0LjgyNSA0SDIxdjJoLTJsMyA3cTAgMS4yNS0xLjAyNSAyLjEyNVQxOC41IDE2cS0xLjQ1IDAtMi40NzUtLjg3NVQxNSAxM2wzLTdoLTMuMTc1cS0uMjI1LjY1LS43IDEuMTI1VDEzIDcuODI1VjE5aDEwdjJIMVptMTUuNjI1LThoMy43NUwxOC41IDguNjUgMTYuNjI1IDEzWm0tMTMgMGgzLjc1TDUuNSA4LjY1IDMuNjI1IDEzWk0xMiA2cS40MjUgMCAuNzEzLS4yODhUMTMgNXEwLS40MjUtLjI4OC0uNzEzVDEyIDRxLS40MjUgMC0uNzEzLjI4OFQxMSA1cTAgLjQyNS4yODguNzEzVDEyIDZaIi8+PC9zdmc+Cg=="></a></p>
+FNPak 是运行在飞牛 fnOS 上的 Web 服务端：在 NAS 上登录你的 PikPak 账号，用浏览器管理云端文件与下载任务，不需要桌面客户端。
 
-<p align="center"><b>高性能、多平台的 PikPak 客户端</b></p>
+## 功能
 
-<p align="center">开发进展与更新日志发布在 Telegram 频道 <a href="https://t.me/piko_dev">@piko_dev</a></p>
+- **目录浏览**：文件/文件夹层级浏览，卡片/表格两套布局，桌面与移动端自适应
+- **多选与文件夹下载**：同目录文件与文件夹混合多选，合并为同一批次；文件夹服务端递归展开
+- **多线程分段下载**：默认 8 段（可配 1–32），本地断点续传，全局连接预算
+- **离线任务**：磁力/分享链接入库，查看进度与子项，支持多选删除
+- **回收站**：列出、恢复、彻底删除（永久删除前二次确认并写出目标名称）
+- **文件操作**：重命名、批量移动、批量复制（移动/复制逐条返回失败原因）
+- **设置**：访问口令、下载目录、授权目录、主题、退出登录
+- **移动端**：≤768px 卡片布局，44px 触控目标，批量操作条分层，无横向滚动
+- **自包含**：前端资源打包进服务端，离线可用，无 CDN 依赖
 
-<p align="center"><a href="https://trendshift.io/repositories/263280?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-263280" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/263280/weekly?language=Kotlin" alt="Trendshift: NihilDigit/piko" width="250" height="53"/></a></p>
+## 安装（fnOS）
 
-## 自适应布局
+1. 在 [Releases](https://github.com/YanGHaYu/fnpak-fpk/releases) 下载 `fnpak.fpk`（或自行构建）
+2. fnOS「应用中心 → 手动安装」上传 fpk
+3. 首次打开会进入「设置访问口令」向导，设置后进入
+4. 在「应用设置 → 访问权限」给 FNPak 授权至少一个共享目录；也可在 FNPak 设置页选择下载目录
+5. 浏览器访问 `http://<NAS>:18080`（fpk 内 `cmd/main` 以 `--host 0.0.0.0` 启动；如需限制监听地址请改该脚本）
 
-桌面端贴合键鼠操作，移动端简洁易用。支持多标签工作区、瀑布流视频与图片浏览，以及将本地文件夹只读挂载至当前网盘目录统一查看。界面提供简体中文、繁体中文、韩语、日语与英语。
+> 升级/迁移老用户（原 `piko` 包）请看下文「从 Piko 迁移」。
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/hero-dark.jpg">
-<img src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/hero.jpg" alt="桌面端与手机端的海报墙">
-</picture>
-</p>
+## 构建
 
-## 信息流
+### 本机（Linux，免 Docker）
 
-随机播放当前文件夹或所选视频中的片段，上下滑动切换，支持自动顺延与自动连播。
+前置：
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" type="image/avif" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/feed-dark.avif">
-<source type="image/avif" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/feed.avif">
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/feed-dark.jpg">
-<img src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/feed.jpg" alt="网盘右侧的信息流，上下滑动切换视频片段">
-</picture>
-</p>
+- JDK 21（`JDK` 或 `JAVA_HOME` 指向）
+- Linux 版 `fnpack` 1.2.1：<https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64>
+  （sha256 `72d2a4095da676b64510b023731a227b369d80f8079bc45ff8a2f802ec0480c1`）
+- 系统工具：`tar`、`rsync`、`readelf`、`file`、`sha256sum`
 
-## 链接与文件名解析
+```bash
+# 1) 构建服务端
+./gradlew :server:installDist --configure-on-demand --no-daemon
 
-解析磁力链接、种子、下载地址与分享链接，保存前可完整预览、按文件挑选，或以不占网盘空间的引用形式保存。文件按作品与集数整理，收起样片与花絮。
+# 2) 打 fpk（appname/版本全部来自 fnos/manifest）
+FNPACK=/path/to/fnpack ./scripts/build-fpk.sh
+# 产物：dist/fnpak.fpk + dist/sha256sum.txt
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/links-dark.jpg">
-<img src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/links.jpg" alt="网盘中按作品整理的剧集，右侧是解析磁力链接的面板">
-</picture>
-</p>
+# 3) 校验权限与 GLIBC
+./scripts/check-fpk.sh build/fpk/stage
+```
 
-## 传输
+> 必须在 Linux（或 WSL Ubuntu）上执行 fnpack，Windows 侧打包会丢失 0755 执行位。
 
-多连接并发，自动绕开缓慢或无响应的节点，优化高延迟与弱网下的播放和下载体验。蜗牛模式限速，不影响播放。
+### GitHub Actions
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/transfers-dark.jpg">
-<img src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/transfers.jpg" alt="传输页：进行中与已完成的下载、上传与云端任务">
-</picture>
-</p>
+- `build-server.yml`：PR/push 自动构建 `fnpak.fpk`，校验 0755 与 GLIBC ≤ 2.36，上传 artifact
+- `build-web.yml`：`web-ui/` 变更时构建前端并校验 `server/src/main/resources/web` 与产物一致
+- `release.yml`：推送 `v*` tag 时构建并发布 Release（含源码 tag 链接，履行 AGPL §6/§13）
 
-## 文件处理
+三个工作流均**不需要 secrets**；Release 使用 `GITHUB_TOKEN`。
 
-本地目录树支持全盘即时模糊搜索，支持归档释放网盘空间、截取视频片段、批量重命名与跨目录查找重复文件。
+## 已知限制
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/tools-dark.jpg">
-<img src="https://raw.githubusercontent.com/NihilDigit/piko/main/docs/screenshots/tools.jpg" alt="手机上的截取视频片段与查找重复">
-</picture>
-</p>
+- **未做真实账号端到端验证的部分**：PikPak 登录/验证码、离线任务真实入库、分享链接解析等依赖第三方服务的行为，仓库内测试使用 mock/fixture；不同账号与地区可能表现不同
+- **转码档单流**：视频转码播放同一时间只支持一个流，多开会被拒绝
+- **回收站首页 100 条**：回收站列表首屏最多展示 100 条，更多需要配合搜索/分页能力（后续版本完善）
+- **反代下来源 IP**：0.6.x 记录的是直连地址；经反向代理时日志 IP 可能失真，不要把日志 IP 当作审计依据
+- **AGPL 义务**：通过网络使用本服务时，你运营的修改版也必须向使用者提供 Corresponding Source（见下）
 
-## 安装
+## 源码与许可证（AGPL §13）
 
-前往 [Releases](https://github.com/NihilDigit/piko/releases/latest) 下载。安装包均由 GitHub Actions 从源码构建，Release 页面按设备列出应下载的文件。
+本项目以 **AGPL-3.0-or-later** 发布，完整文本见 [LICENSE](LICENSE)。
 
-- **Android**：Android 8.0 及以上。按设备架构选择 APK，无法确定时选 `universal`。
-- **Windows**：x64 需 Windows 10 及以上，arm64 需 Windows 11 及以上。`.msi` 为安装版，`.7z` 为便携版；Windows 11 可在资源管理器中直接解压，Windows 10 可用 [NanaZip](https://apps.microsoft.com/detail/9n8g7tscl18r) 或 7-Zip 解压。
-- **macOS**（实验性）：macOS 12 及以上，仅 Apple 芯片。安装包未经公证，首次打开需在「系统设置」→「隐私与安全性」中放行。
-- **Linux**（实验性）：x64，需 glibc 2.38 及以上（Ubuntu 24.04、Debian 13、Fedora 39 或更新）。AppImage 添加执行权限后运行。
+- 源码仓库：<https://github.com/YanGHaYu/fnpak>
+- 每个 Release 的正文都包含与二进制完全对应的源码 tag 链接
+
+如果你修改并在网络上运行本程序，必须向所有远程使用者提供你修改版的 Corresponding Source。
+
+## 从 Piko 迁移（appname `piko` → `fnpak`）
+
+升级后安装目录从 `/var/apps/piko` 变为 `/var/apps/fnpak`，旧数据仍在 `/var/apps/piko`。
+
+**方案 A：迁移数据（保留口令与任务）**
+
+```bash
+# 1) 先在应用中心停止旧 Piko
+# 2) 用 root/SSH 复制运行时数据（按需）
+mkdir -p /var/apps/fnpak/var
+cp -a /var/apps/piko/var/access-token        /var/apps/fnpak/var/ 2>/dev/null || true
+cp -a /var/apps/piko/var/settings.json       /var/apps/fnpak/var/ 2>/dev/null || true
+cp -a /var/apps/piko/var/download-tasks.json /var/apps/fnpak/var/ 2>/dev/null || true
+cp -a /var/apps/piko/var/accounts*           /var/apps/fnpak/var/ 2>/dev/null || true
+cp -a /var/apps/piko/var/downloads           /var/apps/fnpak/var/ 2>/dev/null || true
+# 3) 安装 fnpak.fpk，首次启动前再确认权限与属主
+chown -R fnos:fnos /var/apps/fnpak/var 2>/dev/null || true
+chmod 0600 /var/apps/fnpak/var/access-token 2>/dev/null || true
+```
+
+**方案 B：不迁移**：安装后重新设置访问口令，并在设置页重新选择下载目录即可；云端文件不受影响，已下载文件仍在原目录。
+
+注意：
+
+- `settings.json` 里若写有旧的下载目录，仍可直接使用；也可在新设置页改到新目录
+- 登录会话 Cookie 名从 `piko_session` 改为 `fnpak_session`，迁移后需要重新登录（口令不变）
+- fnOS 的目录授权按 appname 隔离，新包需要在「应用设置 → 访问权限」重新授权共享目录
+- 旧包若被卸载，部分系统可能清理 `/var/apps/piko`，请先复制再卸载
 
 ## 贡献
 
-路线图见 [#10](https://github.com/NihilDigit/piko/issues/10)。
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
-欢迎提交 Issue 与 PR。小的 Bug 修复、崩溃排查与文档补充可以直接提交。
+## 致谢
 
-计划新增功能或调整架构时，请先提交 Issue，说明使用场景与拟定方案，确认方向后再实现。
-
-使用 LLM 辅助编写代码时，请理解新增代码的逻辑，并在真机上验证。
-
-提交 PR 前须签署[贡献者协议](CLA.md)，签署方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 许可与致谢
-
-- 源码以 [AGPL-3.0-or-later](LICENSE) 许可证开源。1.1.0 及更早的版本以 MIT 许可证发布。
-  Android 安装包内置以 GPLv3 构建的 mpv 与 FFmpeg。
-- PikPak 接口实现参考了 [52funny/pikpakcli](https://github.com/52funny/pikpakcli)。
-- 多项功能设计参考了 PikPak 网页端增强脚本 [digbug82/PikPak_Enhancement_Master](https://github.com/digbug82/PikPak_Enhancement_Master)。
-- Windows 端 mpv 的零拷贝渲染由 [MediaMP](https://github.com/open-ani/mediamp) 实现。
-
-## Star History
-
-<a href="https://www.star-history.com/#nihildigit/piko&Date">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=nihildigit/piko&type=Date&theme=dark&legend=bottom-right">
-<img alt="Star History Chart" src="https://api.star-history.com/svg?repos=nihildigit/piko&type=Date&legend=bottom-right">
-</picture>
-</a>
+- [NihilDigit/piko](https://github.com/NihilDigit/piko)：上游项目与 PikPak SDK
+- Ktor、Kotlin、Element Plus、Vue、sqlite-jdbc 等开源依赖（见 [THIRD-PARTY.md](THIRD-PARTY.md)）
+- 飞牛 fnOS 提供的打包规范与运行环境

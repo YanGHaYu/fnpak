@@ -1,22 +1,37 @@
 # 参与贡献
 
-路线图见 [#10](https://github.com/NihilDigit/piko/issues/10)。小的 Bug 修复、崩溃排查与文档补充可以直接提交 PR；
-计划新增功能或调整架构时，请先提交 Issue，说明使用场景与拟定方案，确认方向后再实现。
+感谢你愿意帮助 FNPak。本仓库是上游 [NihilDigit/piko](https://github.com/NihilDigit/piko) 的 fork，面向飞牛 fnOS 的服务端与打包。
 
-## 许可与 CLA
+## 流程
 
-Piko 以 [AGPL-3.0-or-later](LICENSE) 开源。提交 PR 前须签署[个人贡献者协议](CLA.md)（CLA）：贡献者保留版权，
-并授权本项目发布所贡献的内容。本项目可另以其他许可证授权，但所贡献的内容始终以 AGPL-3.0-or-later 提供。
+1. 先搜 Issue，避免重复；较大的功能或架构调整请先开 Issue 说明场景与方案
+2. Fork 本仓库，从 `main` 建分支（`feat/...`、`fix/...`）
+3. 提交前本地跑：
+   ```bash
+   ./gradlew :server:installDist --configure-on-demand --no-daemon
+   cd web-ui && npm ci && npm run build
+   ./scripts/check-fpk.sh build/fpk/stage   # 若已打包
+   ```
+4. PR 描述里写清：改动内容、验证方式、影响范围；前端改动请附截图
+5. 不要提交 `access-token`、`accounts.json`、`settings.json`、`download-tasks.json`、日志、`*.fpk`、构建缓存
 
-首次提交 PR 时，机器人会在 PR 下留言。回复以下内容即完成签署，每位贡献者只需签署一次：
+## 许可
 
-```
-I have read the CLA Document and I hereby sign the CLA
-```
+- 本仓库整体以 **AGPL-3.0-or-later** 分发，提交即表示你同意以同一许可证授权你的贡献
+- **本仓库不要求签署 CLA**。根目录 `CLA.md` 仅说明上游 NihilDigit/piko 的贡献协议；只有当你把补丁回贡给上游时才需要遵守上游的 CLA 流程
+- 新增文件请加 SPDX 头：
+  ```kotlin
+  // SPDX-License-Identifier: AGPL-3.0-or-later
+  // Copyright (C) 2026 <你的名字>
+  ```
+- 不要移除上游版权声明；修改上游文件时在 `NOTICE` 记录修改模块与日期
 
-PR 中每一个提交的作者都须签署。签名记录保存在本仓库的 `cla-signatures` 分支。
+## 代码风格
 
-## 开发
+- Kotlin：沿用现有包名 `dev.piko.*`（不因产品更名而重排包结构，避免破坏上游同步）
+- Vue：`<script setup lang="ts">`，样式沿用现有 CSS 变量与 44px 触控规则
+- 提交信息：`feat(scope): ...` / `fix(scope): ...` / `docs: ...`
 
-构建与测试命令见 [CLAUDE.md](CLAUDE.md) 的「常用命令」。改动须在 Android 与桌面端均通过编译。
-使用 LLM 辅助编写代码时，请理解新增代码的逻辑，并在真机上验证。
+## 行为准则
+
+参与本项目即表示同意 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
