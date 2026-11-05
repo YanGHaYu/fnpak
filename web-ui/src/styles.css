@@ -590,9 +590,16 @@ body {
   .child-line {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     font-size: 11.5px;
     padding: 2px 0;
+  }
+
+  /* 失败原因在窄屏独占一行，避免挤掉文件名与进度 */
+  .child-error {
+    flex-basis: 100%;
+    padding-left: 2px;
   }
 
   .child-name {

@@ -284,11 +284,24 @@
                           <span class="num">{{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}</span>
                         </template>
                       </el-table-column>
-                      <el-table-column label="状态" width="130">
+                      <el-table-column label="状态" width="150">
                         <template #default="{ row: child }">
                           <el-tag size="small" :type="statusType(child.status)" effect="plain">
                             {{ childStatusText(child.status) }} · {{ Number(child.percent) || 0 }}%
                           </el-tag>
+                          <div v-if="child.error" class="error-line">{{ child.error }}</div>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="操作" width="64" align="center" class-name="action-col">
+                        <template #default="{ row: child }">
+                          <!-- 行内操作只作用于当前点击的这一个文件；已完成项没有可做的操作，不显示入口 -->
+                          <RowActionMenu
+                            v-if="childActions(child).length"
+                            trigger="hover"
+                            :label="child.fileName"
+                            :actions="childActions(child)"
+                            @select="(key) => onChildAction(child, key)"
+                          />
                         </template>
                       </el-table-column>
                     </el-table>
@@ -407,6 +420,15 @@
                         {{ childStatusText(child.status) }} · {{ Number(child.percent) || 0 }}%
                       </el-tag>
                       <span class="num">{{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}</span>
+                      <RowActionMenu
+                        v-if="childActions(child).length"
+                        trigger="click"
+                        placement="bottom-end"
+                        :label="child.fileName"
+                        :actions="childActions(child)"
+                        @select="(key) => onChildAction(child, key)"
+                      />
+                      <div v-if="child.error" class="error-line child-error">{{ child.error }}</div>
                     </div>
                   </div>
                 </div>
@@ -420,6 +442,16 @@
                 <span>已选 <b>{{ groupSelection.length }}</b> 项</span>
               </div>
               <div class="selection-actions">
+                <!-- 只重试选中组里的失败子项；已完成/下载中/排队中的不会被动到 -->
+                <el-button
+                  v-if="failedSelectedCount"
+                  size="small"
+                  type="warning"
+                  :loading="retryBusy"
+                  @click="retrySelectedFailed"
+                >
+                  重试失败项 ({{ failedSelectedCount }})
+                </el-button>
                 <el-button size="small" type="danger" @click="deleteRecords(groupSelection)">删除记录</el-button>
                 <el-button size="small" @click="clearGroupSelection">取消选择</el-button>
               </div>
@@ -658,6 +690,7 @@ const groups = ref([])
 const groupTable = ref(null)
 const groupSelection = ref([])
 const downloadHint = ref('')
+const retryBusy = ref(false)
 // 展开中的批次：全量刷新后按 row-key 重新展开，切 Tab 不丢
 const expandedGroupIds = new Set()
 let downloadsSyncTimer = null
@@ -708,6 +741,13 @@ const activeGroupCount = computed(() =>
 )
 const unfinishedTaskCount = computed(() =>
   tasks.value.filter((task) => !['PHASE_TYPE_COMPLETE', 'PHASE_TYPE_ERROR'].includes(task.phase)).length,
+)
+// 批量条只统计选中组里的失败子项：已完成、下载中、排队中都不算
+const failedSelectedCount = computed(() =>
+  groupSelection.value.reduce(
+    (sum, group) => sum + downloads.value.filter((row) => row.groupId === group.id && row.status === 'FAILED').length,
+    0,
+  ),
 )
 
 let events = null
@@ -1236,11 +1276,25 @@ async function onDriveAction(row, key) {
   if (key === 'delete') return deleteCloud([row])
 }
 
+/** 这一组里处于失败状态的子项数；批量条与组菜单都以它为准。 */
+function failedChildCount(group) {
+  return downloads.value.filter((row) => row.groupId === group.id && row.status === 'FAILED').length
+}
+
+/**
+ * 父任务行的菜单。「重试失败项」只在整组失败时出现（名称里的数字来自真实失败子项），
+ * 已完成/取消的终态组仍只有删除记录。
+ */
 function groupActions(row) {
+  const failed = row.status === 'FAILED' ? failedChildCount(row) : 0
+  const retry = failed
+    ? [{ key: 'retry-failed', label: `重试失败项 (${failed})`, icon: 'retry', hint: '只重跑失败/中断的子项，已完成的不动，断点续传' }]
+    : []
   if (isTerminal(row.status)) {
-    return [{ key: 'delete-record', label: '删除任务', icon: 'delete', danger: true, hint: '只删任务记录，本地文件保留' }]
+    return [...retry, { key: 'delete-record', label: '删除任务', icon: 'delete', danger: true, hint: '只删任务记录，本地文件保留' }]
   }
   return [
+    ...retry,
     { key: 'pause', label: '暂停', icon: 'pause', disabled: !canPause(row), hint: '暂停这个父任务的全部子项' },
     { key: 'resume', label: '继续', icon: 'resume', disabled: !canResume(row), hint: '继续下载这个父任务' },
     { key: 'cancel', label: '取消', icon: 'cancel', danger: true, disabled: !canPause(row), hint: '停止这个父任务，已下载文件保留' },
@@ -1248,9 +1302,90 @@ function groupActions(row) {
   ]
 }
 
+/**
+ * 单个文件（子项）的菜单：只作用于当前点击的这一行。
+ * 失败才有「重试」；已完成项没有任何暂停/继续/取消，因此不显示入口。
+ */
+function childActions(child) {
+  const actions = []
+  if (child.status === 'FAILED') {
+    actions.push({ key: 'retry', label: '重试', icon: 'retry', hint: '只重跑这个文件，从已下载的断点续传' })
+  }
+  if (['PENDING', 'DOWNLOADING'].includes(child.status)) {
+    actions.push({ key: 'pause', label: '暂停', icon: 'pause', hint: '暂停这个文件' })
+  }
+  if (child.status === 'PAUSED') {
+    actions.push({ key: 'resume', label: '继续', icon: 'resume', hint: '从这个文件已下载的位置继续' })
+  }
+  if (!['COMPLETED', 'CANCELLED'].includes(child.status)) {
+    actions.push({ key: 'cancel', label: '取消', icon: 'cancel', danger: true, hint: '停止这个文件，已写入的分块保留' })
+  }
+  return actions
+}
+
+async function onChildAction(child, key) {
+  if (key === 'retry') {
+    const result = await api(`/api/downloads/${encodeURIComponent(child.id)}/retry`, { method: 'POST' })
+    if (!result.ok) {
+      downloadHint.value = errorDetail(result)
+      return
+    }
+    if (result.data?.items) downloads.value = result.data.items
+    if (result.data?.groups) groups.value = result.data.groups
+    downloadHint.value = result.data?.message || '已重新开始，只补齐未完成的区间'
+    return
+  }
+  const result = await api(`/api/downloads/${encodeURIComponent(child.id)}/${key}`, { method: 'POST' })
+  if (!result.ok) {
+    downloadHint.value = errorDetail(result)
+    return
+  }
+  if (result.data?.items) downloads.value = result.data.items
+  if (result.data?.groups) groups.value = result.data.groups
+  downloadHint.value = key === 'cancel' ? '已停止该文件；已写入的分块保留' : ''
+}
+
+async function retrySelectedFailed() {
+  const targets = groupSelection.value.filter((group) =>
+    downloads.value.some((row) => row.groupId === group.id && row.status === 'FAILED'),
+  )
+  if (!targets.length) return
+  retryBusy.value = true
+  let retried = 0
+  const rejected = []
+  for (const group of targets) {
+    const result = await api(`/api/downloads/groups/${encodeURIComponent(group.id)}/retry`, { method: 'POST' })
+    if (!result.ok) {
+      rejected.push(`${group.name || group.id}：${errorText(result)}`)
+      continue
+    }
+    retried += result.data?.retried?.length || 0
+    if (result.data?.items) downloads.value = result.data.items
+    if (result.data?.groups) groups.value = result.data.groups
+  }
+  retryBusy.value = false
+  await loadDownloads()
+  downloadHint.value = rejected.length
+    ? `已重试 ${retried} 个失败项；${rejected.length} 组被拒绝：${rejected.join('；')}`
+    : `已重试 ${retried} 个失败项，只补齐未完成的区间`
+}
+
 function onGroupAction(row, key) {
   if (key === 'delete-record') return deleteRecords([row])
+  if (key === 'retry-failed') return retryGroupFailed(row)
   return groupAction(row, key)
+}
+
+async function retryGroupFailed(group) {
+  const result = await api(`/api/downloads/groups/${encodeURIComponent(group.id)}/retry`, { method: 'POST' })
+  if (!result.ok) {
+    downloadHint.value = errorDetail(result)
+    return
+  }
+  if (result.data?.items) downloads.value = result.data.items
+  if (result.data?.groups) groups.value = result.data.groups
+  await loadDownloads()
+  downloadHint.value = result.data?.message || '已重试失败项，只补齐未完成的区间'
 }
 
 function offlineActions() {

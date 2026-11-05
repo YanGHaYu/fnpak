@@ -55,6 +55,7 @@ import {
   FolderOpened,
   MoreFilled,
   Rank,
+  Refresh,
   RefreshLeft,
   RefreshRight,
   VideoPause,
@@ -83,6 +84,7 @@ const icons = {
   delete: Delete,
   pause: VideoPause,
   resume: RefreshRight,
+  retry: Refresh,
   cancel: CircleClose,
   restore: RefreshLeft,
 }
