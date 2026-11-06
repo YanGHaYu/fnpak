@@ -2,6 +2,19 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.9.1 — 目录行整行点击 / 不可预览确认 / 主题跟随系统 / 长按多选修复
+
+纯前端交互改进，API 与 SSE 契约完全不变。
+
+- 目录行整行可点：`<tr>`/行卡任意空白与名称文字走同一分发（`rowAction.js` 按 folder → video → 可预览类型 → 单卷压缩包 → `.torrent` → 其他 的顺序判定）。文件夹进目录；视频直接播放；图片/音频/PDF/文本/Markdown 直接预览；zip/rar/7z 单卷直接打开解压弹层；`.torrent` 直接打开种子清单
+- 不可预览文件（二进制、无扩展名、分卷 `.part1.rar`、`tar` 等）点行**先确认再下载**：确认框展示文件名、大小与中性说明「该文件无法在浏览器内预览，是否下载到本机？」，确认后才走既有下载链路（目录可写预检、失败原因映射、在途锁）；取消/Esc/点遮罩均无动作。行内菜单里显式点「下载」仍直接开始，不二次确认
+- 隔离与可达性：勾选框、行尾 `⋯`、菜单/弹层内部不触发行动作；移动端名称区横向拖动沿用 `ScrollName` 手势判定；多选模式点行只切换勾选；键盘聚焦行后 Enter/Space 触发同一动作；连点 600ms 去重，下载复用在途锁
+- 主题三态：新增 `system | light | dark`，默认 `system`；`system` 下监听 `matchMedia('(prefers-color-scheme: dark)')` 的 `change`，运行期切换立即生效；`index.html` 挂载前内联脚本即写入根元素 `.dark` 与 `meta name="theme-color"`，深色首屏不再白闪；`fnpak-theme` 显式设置保留，旧键 `piko-theme` 继续回退；设置页新增「外观」三档选择
+- 深色对比度：实心按钮/勾选框/角标改用更深色阶（`*-strong` token），确认框、菜单、输入框、进度条、失败行、骨架屏在深色下无白底白字或低对比度
+- 修复本机下载父任务行与离线任务行的长按多选：模板把 `ref` 直接传给 `startPress`，Vue 模板自动解包为 `null`，每次 `touchstart` 抛 `Cannot read properties of null`，长按永远进不了选择模式；现按目录行同一写法包一层（`startGroupPress/cancelGroupPress`、`startOfflinePress/cancelOfflinePress`），并在长按后 800ms 内吞掉浏览器补发的 `click`，避免误触展开/暂停/重试/取消/删除；回收站行的 `startPress` 是组件内局部函数，不属于同一问题
+- 已知边界：**下载子项行暂不支持长按多选**（子项行没有 touch handler 与子项选择态，属新功能，本版不实现）；主题默认跟随系统，**页头按钮仍是显式浅/深切换**，三态选择在设置页
+- 版本 `0.9.1`（manifest / `ServerConfig` / `/api/health` / `package.json` 与构建产出一致）
+
 ## 0.9.0 — 目录排序 / 在线预览 / 在线解压 / 种子
 
 - 目录 Tab 排序：时间 / 文件名 / 文件类型 × 正序 / 倒序，默认「时间倒序 + 文件夹恒定在前」；名称用 `Intl.Collator(zh-Hans-CN, numeric)` 自然排序，时间缺失恒排最后；偏好写入 localStorage；排序作用于已取回的数据源，不产生额外请求；`FileItem` 新增 `createdAtMs`（`createdTime` 解析为 UTC 毫秒，失败为 `null`）
