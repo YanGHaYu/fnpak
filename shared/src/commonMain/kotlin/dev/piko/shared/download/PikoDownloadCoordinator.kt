@@ -222,6 +222,15 @@ class PikoDownloadCoordinator(
                 resumeListings()
             }
         }
+        // 队列自愈：调度全靠事件驱动，漏一次唤醒任务就会永久停在 PENDING，定期做一致性检查兜底。
+        // 只清「协程已结束」的残留登记并补一次调度，不干预任何正在跑的下载。
+        scope.launch {
+            while (true) {
+                delay(QUEUE_WATCHDOG_INTERVAL_MS)
+                restoreCompleted.await()
+                reconcileQueue()
+            }
+        }
     }
 
     /**
@@ -778,9 +787,14 @@ class PikoDownloadCoordinator(
             return DownloadRetryOutcome(taskId, false, tr("该文件正在下载中，请等它结束或先暂停", "This file is downloading; wait for it to finish or pause it first", "このファイルはダウンロード中です。終了を待つか一時停止してください", "이 파일은 다운로드 중입니다. 완료를 기다리거나 먼저 일시중지하세요", "該檔案正在下載中，請等它結束或先暫停"))
         }
         when (task.status) {
-            DownloadStatus.DOWNLOADING, DownloadStatus.PENDING -> return DownloadRetryOutcome(
-                taskId, false, tr("该文件正在下载中或排队中，不会重复建任务", "This file is already downloading or queued; no duplicate task was created", "このファイルはダウンロード中または待機中です。重複タスクは作成しません", "이 파일은 이미 다운로드 중이거나 대기 중입니다. 중복 작업을 만들지 않습니다", "該檔案正在下載中或排隊中，不會重複建立任務"),
-            )
+            DownloadStatus.DOWNLOADING, DownloadStatus.PENDING -> {
+                // 排队中的任务可能正等并发名额；重试至少唤醒一次调度，让它在有空位时重新评估。
+                // 状态不变、也不会重复建任务。
+                pumpQueue()
+                return DownloadRetryOutcome(
+                    taskId, false, tr("该文件正在下载中或排队中，不会重复建任务", "This file is already downloading or queued; no duplicate task was created", "このファイルはダウンロード中または待機中です。重複タスクは作成しません", "이 파일은 이미 다운로드 중이거나 대기 중입니다. 중복 작업을 만들지 않습니다", "該檔案正在下載中或排隊中，不會重複建立任務"),
+                )
+            }
             DownloadStatus.COMPLETED -> return DownloadRetryOutcome(
                 taskId, false, tr("该文件已下载完成，无需重试", "This file is already complete; no retry needed", "このファイルはダウンロード済みです。再試行は不要です", "이 파일은 이미 완료되었습니다. 재시도할 필요가 없습니다", "該檔案已下載完成，無需重試"),
             )
@@ -1278,19 +1292,21 @@ class PikoDownloadCoordinator(
     private fun launchTracked(taskId: String, block: suspend () -> Unit) {
         var previous: Job? = null
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
-            val self = currentCoroutineContext()[Job]
-            try {
-                // 暂停后马上继续时，被取消的旧协程可能还在写最后一块。两者同时追加同一个文件，
-                // 续传点就对不上了，所以先等它彻底退出
-                previous?.join()
-                if (_tasks.value[taskId]?.status != DownloadStatus.DOWNLOADING) return@launch
-                block()
-            } finally {
-                // 只摘自己：暂停后立刻继续时，表里已经是新协程，旧协程的收尾不能把它摘掉
-                jobs.update { current -> if (current[taskId] === self) current - taskId else current }
-                // 腾出一个位置，同一批里排着的补上
-                pumpQueue()
-            }
+            // 暂停后马上继续时，被取消的旧协程可能还在写最后一块。两者同时追加同一个文件，
+            // 续传点就对不上了，所以先等它彻底退出
+            previous?.join()
+            if (_tasks.value[taskId]?.status != DownloadStatus.DOWNLOADING) return@launch
+            block()
+        }
+        // 收尾用 invokeOnCompletion 而不是协程体里的 finally：登记之后、真正 start() 之前被取消
+        // （暂停与入队交错）时协程体根本不会执行，finally 也就永远不跑，jobs 里会留下一个已完成的
+        // 死条目。它既占着并发位置，又因为 `taskId !in jobs.value` 把同名任务挡在排队之外——
+        // 任务永远停在 PENDING，重试、暂停继续都不会开始，只能重启进程清空登记表。
+        job.invokeOnCompletion {
+            // 只摘自己：暂停后立刻继续时，表里已经是新协程，旧协程的收尾不能把它摘掉
+            jobs.update { current -> if (current[taskId] === job) current - taskId else current }
+            // 腾出一个位置，同一批里排着的补上
+            pumpQueue()
         }
         var registered = false
         jobs.update { current ->
@@ -1306,6 +1322,35 @@ class PikoDownloadCoordinator(
         }
         if (registered) job.start() else job.cancel()
     }
+
+    /**
+     * 队列自愈：调度完全靠事件驱动（入队、任务结束、暂停继续），一旦登记表里留下死条目或漏掉
+     * 一次唤醒，排队中的任务就永远停在 PENDING。这里每 [QUEUE_WATCHDOG_INTERVAL_MS] 做一次一致性
+     * 检查，不动任何正在跑的下载：
+     * 1. 清掉「协程已结束」的登记（正常收尾不会留下，残留只会来自取消与启动的竞态）；
+     * 2. 卡在 DOWNLOADING 但协程已结束的任务回到 PENDING，按断点续传重新排队；
+     * 3. 有排队任务且有空位就补一次调度。
+     */
+    private fun reconcileQueue() {
+        val completedJobs = jobs.value.filterValues { it.isCompleted }
+        if (completedJobs.isNotEmpty()) {
+            val revived = mutableListOf<String>()
+            completedJobs.forEach { (taskId, _) ->
+                val task = _tasks.value[taskId]
+                if (task != null && task.status == DownloadStatus.DOWNLOADING && belongsToCurrent(task)) {
+                    // 协程已结束而任务还挂在「下载中」：恢复成排队，按已落盘区间续传
+                    update(taskId) { it.copy(status = DownloadStatus.PENDING, speedBytesPerSec = 0L, segments = null) }
+                    revived += taskId
+                }
+            }
+            jobs.update { it - completedJobs.keys }
+            PikoLog.w(TAG, "队列自愈：清理 ${completedJobs.size} 个已结束的下载登记" +
+                if (revived.isEmpty()) "" else "，${revived.size} 个卡在下载中的任务重新排队")
+        }
+        val pending = _tasks.value.values.count { it.status == DownloadStatus.PENDING && belongsToCurrent(it) }
+        if (pending > 0 && jobs.value.size < BATCH_PARALLEL) pumpQueue()
+    }
+
 
     private fun update(taskId: String, transform: (DownloadTask) -> DownloadTask) {
         _tasks.update { tasks -> tasks[taskId]?.let { tasks + (taskId to transform(it)) } ?: tasks }
@@ -1324,6 +1369,9 @@ class PikoDownloadCoordinator(
          * 只下一个又太慢：字幕、图片这类小文件的耗时几乎全在取直链上。
          */
         const val BATCH_PARALLEL = 3
+
+        /** 队列自愈检查的间隔：比正常调度慢得多，只用来兜住「永久排队」这种异常。 */
+        const val QUEUE_WATCHDOG_INTERVAL_MS = 10_000L
         const val BATCH_LOG_MIN_BYTES = 64L * 1024 * 1024
         private const val DOWNLOAD_WINDOW_BYTES = 4L * 1024 * 1024
         val json = Json { ignoreUnknownKeys = true }
