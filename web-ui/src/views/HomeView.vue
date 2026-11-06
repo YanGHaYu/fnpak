@@ -90,29 +90,43 @@
           <ProgressiveList :items="sortedItems" :step="40">
             <template #default="{ row }">
               <div
-                class="mb-2 grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-surface px-1.5 py-1.5 transition-colors hover:bg-surface2 md:grid-cols-[auto_auto_minmax(0,1fr)_110px_150px_auto]"
-                @touchstart.passive="startPress(drivePressTimer, () => enterDriveSelection(row))"
-                @touchend="cancelPress(drivePressTimer)"
-                @touchmove="cancelPress(drivePressTimer)"
+                class="drive-row relative mb-2 grid cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-surface px-1.5 py-1.5 transition-colors hover:bg-surface2 focus-within:ring-2 focus-within:ring-ink/20 md:grid-cols-[auto_auto_minmax(0,1fr)_110px_150px_auto]"
+                @touchstart.passive="startDrivePress(row)"
+                @touchend="cancelDrivePress"
+                @touchmove="cancelDrivePress"
               >
-                <AppCheckbox
-                  :class="driveSelectionMode ? '' : 'max-md:hidden'"
-                  :model-value="isDriveSelected(row)"
-                  :label="`选择 ${row.name || row.id}`"
-                  @update:model-value="(value) => toggleDriveRow(row, value)"
+                <!-- 透明整行命中层：空白区域/图标/元信息都走这里；勾选框与菜单在上层 z-10 -->
+                <button
+                  type="button"
+                  tabindex="-1"
+                  aria-hidden="true"
+                  data-row-hit
+                  class="absolute inset-0 z-0 rounded-md focus:outline-none"
+                  @click="activateDriveRow(row)"
                 />
+
+                <div data-row-interactive class="relative z-10 max-md:col-start-1">
+                  <AppCheckbox
+                    :class="driveSelectionMode ? '' : 'max-md:hidden'"
+                    :model-value="isDriveSelected(row)"
+                    :label="`选择 ${row.name || row.id}`"
+                    @update:model-value="(value) => toggleDriveRow(row, value)"
+                  />
+                </div>
 
                 <span class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted max-md:col-start-2">
                   <AppIcon :name="row.isFolder ? 'folder' : (row.isVideo ? 'play' : 'file')" :size="18" />
                 </span>
 
-                <div class="min-w-0 max-md:col-start-3">
+                <div class="pointer-events-none relative z-10 min-w-0 max-md:col-start-3">
                   <ScrollName :label="row.name || row.id">
                     <button
                       type="button"
-                      class="flex min-w-0 items-center gap-2 text-left md:w-full"
+                      data-row-name
+                      class="pointer-events-auto flex w-full min-w-0 items-center gap-2 text-left"
                       :title="row.name || row.id"
-                      @click="onRowClick(row)"
+                      :aria-label="rowActionLabel(row)"
+                      @click="activateDriveRow(row)"
                     >
                       <span class="truncate text-sm font-medium" :class="{ 'font-mono': !row.isFolder }">{{ row.name || row.id }}</span>
                       <span v-if="row.isFolder" class="shrink-0 rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] text-muted">目录</span>
@@ -131,7 +145,7 @@
                   {{ row.isFolder ? '' : row.mimeType || '' }}
                 </span>
 
-                <div class="max-md:col-start-4">
+                <div data-row-interactive class="relative z-10 max-md:col-start-4">
                   <RowActionMenu
                     trigger="hover"
                     :label="row.name || row.id"
@@ -549,6 +563,7 @@ import { readDriveSort, saveDriveSort, sortDriveItems } from '../driveSort'
 import { previewKindFor } from '../preview'
 import { archiveEntryState } from '../archive'
 import { openTorrent, saveOfflineLink, torrentEntryState, torrentErrorText } from '../torrent'
+import { rowActionFor, rowActionLabel } from '../rowAction'
 import { toast } from '../components/ui/toast'
 import { refreshAuth, state } from '../store'
 
@@ -740,7 +755,15 @@ function cancelPress(timerRef) {
   if (timerRef.value) clearTimeout(timerRef.value)
   timerRef.value = null
 }
+/* 模板里的 ref 会被 Vue 自动解包成当前值，不能再把 ref 本身当参数传：这里包一层再交给共用定时器。 */
+function startDrivePress(row) {
+  startPress(drivePressTimer, () => enterDriveSelection(row))
+}
+function cancelDrivePress() {
+  cancelPress(drivePressTimer)
+}
 function enterDriveSelection(row) {
+  driveLongPressAt = Date.now()
   driveSelectionMode.value = true
   if (!isDriveSelected(row)) toggleDriveRow(row, true)
 }
@@ -879,6 +902,7 @@ async function loadList() {
 }
 
 function enter(item) {
+  if (!item?.id || crumbs.value[crumbs.value.length - 1]?.id === item.id) return
   crumbs.value = [...crumbs.value, { id: item.id, name: item.name }]
   loadList()
 }
@@ -895,8 +919,29 @@ function jumpTo(index) {
   loadList()
 }
 
-function onRowClick(row) {
-  if (row.isFolder) enter(row)
+/* 整行点击 / 名称点击共用同一分发；同一行 600ms 内只执行一次，避免双击重复下载或重复打开。 */
+const rowActivationLock = new Map()
+let driveLongPressAt = 0
+
+function activateDriveRow(row) {
+  if (!row) return
+  if (Date.now() - driveLongPressAt < 800) return
+  const now = Date.now()
+  if (now - (rowActivationLock.get(row.id) || 0) < 600) return
+  rowActivationLock.set(row.id, now)
+
+  if (driveSelectionMode.value) {
+    toggleDriveRow(row, !isDriveSelected(row))
+    return
+  }
+  switch (rowActionFor(row)) {
+    case 'enter': return enter(row)
+    case 'video': return openPlayer(row)
+    case 'preview': return openPreview(row)
+    case 'extract': return openExtract(row)
+    case 'torrent-open': return openTorrentDialog(row)
+    case 'download': return startDownload(row.id)
+  }
 }
 
 // 目录勾选：文件与文件夹都可选；下载时文件夹走递归扫描
@@ -1091,13 +1136,21 @@ async function downloadFolder(row) {
   downloadHint.value = `正在递归扫描「${row.name}」：已发现 ${data.childCount || 0} 个文件，扫描完成后统一入队`
 }
 
+const downloadsInFlight = new Set()
+
 async function startDownload(fileId) {
-  const result = await api('/api/downloads', { method: 'POST', body: JSON.stringify({ fileId }) })
-  if (!result.ok) {
-    listStatus.value = errorDetail(result)
-    return
+  if (!fileId || downloadsInFlight.has(fileId)) return
+  downloadsInFlight.add(fileId)
+  try {
+    const result = await api('/api/downloads', { method: 'POST', body: JSON.stringify({ fileId }) })
+    if (!result.ok) {
+      listStatus.value = errorDetail(result)
+      return
+    }
+    await loadDownloads()
+  } finally {
+    downloadsInFlight.delete(fileId)
   }
-  await loadDownloads()
 }
 
 async function groupAction(group, action) {
@@ -1539,6 +1592,8 @@ async function saveLink() {
 }
 
 function openPlayer(item) {
+  if (!item) return
+  if (playerOpen.value && playingItem.value?.id === item.id) return
   playingItem.value = item
   playerOpen.value = true
   nextTick(() => playerRef.value?.start())
@@ -1546,9 +1601,11 @@ function openPlayer(item) {
 
 /** 非视频的可预览文件走统一预览弹层；视频继续用播放弹层（Range 探测逻辑复用）。 */
 function openPreview(item) {
+  if (!item) return
   const kind = previewKindFor(item)
   if (!kind) return
   if (kind === 'video') return openPlayer(item)
+  if (previewOpen.value && previewItem.value?.id === item.id) return
   previewItem.value = item
   previewOpen.value = true
 }
@@ -1560,14 +1617,16 @@ async function downloadPreviewItem(item) {
 
 /** 在线解压只对单卷 zip/rar/7z 开放，分卷与 tar 在 driveActions 里就不给入口。 */
 function openExtract(item) {
-  if (archiveEntryState(item) !== 'extractable') return
+  if (!item || archiveEntryState(item) !== 'extractable') return
+  if (archiveOpen.value && archiveItem.value?.id === item.id) return
   archiveItem.value = item
   archiveOpen.value = true
 }
 
 /** 「打开」先解析文件清单；「离线下载」跳过弹层，解析出 magnet 后直接提交。 */
 function openTorrentDialog(item) {
-  if (!torrentEntryState(item)) return
+  if (!item || !torrentEntryState(item)) return
+  if (torrentOpen.value && torrentItem.value?.id === item.id) return
   torrentItem.value = item
   torrentOpen.value = true
 }
