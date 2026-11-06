@@ -71,6 +71,11 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     val instantRepository: InstantMagnetRepository = InstantMagnetRepository(clientManager)
 
+    /** 官方在线解压：列目录、提交任务、查询进度，密码只走请求体。 */
+    val archiveRepository = dev.piko.shared.data.ArchiveRepository(clientManager)
+
+    val archiveJobs = dev.piko.server.archive.ArchiveJobRegistry(archiveRepository, scope)
+
     val taskRepository: TaskRepository = TaskRepository(clientManager, driveRepository, instantRepository)
 
     /** 离线任务名字解析：详情按 fileId 缓存，并发上限 4。 */

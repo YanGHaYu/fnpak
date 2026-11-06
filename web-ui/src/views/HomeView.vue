@@ -498,6 +498,8 @@
 
     <PreviewDialog v-model="previewOpen" :item="previewItem" @download="downloadPreviewItem" />
 
+    <ArchiveDialog v-model="archiveOpen" :item="archiveItem" @done="loadList()" />
+
     <!-- 移动端批量操作抽屉（桌面用行内浮层） -->
     <AppSheet v-model:open="batchSheet" title="批量操作">
       <div class="space-y-2">
@@ -514,6 +516,7 @@ import { useRoute, useRouter } from 'vue-router'
 import DirTreePicker from '../components/DirTreePicker.vue'
 import DriveSortControl from '../components/DriveSortControl.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
+import ArchiveDialog from '../components/ArchiveDialog.vue'
 import PreviewDialog from '../components/PreviewDialog.vue'
 import RowActionMenu from '../components/RowActionMenu.vue'
 import ScrollName from '../components/ui/ScrollName.vue'
@@ -536,6 +539,7 @@ import { tabCounts } from '../counts'
 import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
 import { readDriveSort, saveDriveSort, sortDriveItems } from '../driveSort'
 import { previewKindFor } from '../preview'
+import { archiveEntryState } from '../archive'
 import { refreshAuth, state } from '../store'
 
 const route = useRoute()
@@ -639,6 +643,8 @@ const playingItem = ref(null)
 const playerRef = ref(null)
 const previewOpen = ref(false)
 const previewItem = ref(null)
+const archiveOpen = ref(false)
+const archiveItem = ref(null)
 
 const activeGroupCount = computed(() =>
   groups.value.filter((group) => ['SCANNING', 'QUEUED', 'DOWNLOADING'].includes(group.status)).length,
@@ -1187,6 +1193,9 @@ function driveActions(row) {
   // 视频沿用「播放」入口；图片/音频/PDF/文本/Markdown 给「预览」
   if (row.isVideo) actions.push({ key: 'play', label: '播放', icon: 'play', hint: `播放「${row.name || row.id}」` })
   else if (previewKind) actions.push({ key: 'preview', label: '预览', icon: 'eye', hint: `在线预览「${row.name || row.id}」` })
+  if (archiveEntryState(row) === 'extractable') {
+    actions.push({ key: 'extract', label: '解压', icon: 'archive', hint: `在线解压「${row.name || row.id}」到当前目录` })
+  }
   if (row.isFolder) {
     actions.push({ key: 'download-folder', label: '下载文件夹', icon: 'folder', hint: '递归下载整个文件夹' })
   } else {
@@ -1202,6 +1211,7 @@ function driveActions(row) {
 async function onDriveAction(row, key) {
   if (key === 'play') return openPlayer(row)
   if (key === 'preview') return openPreview(row)
+  if (key === 'extract') return openExtract(row)
   if (key === 'download-folder') return downloadFolder(row)
   if (key === 'download') return startDownload(row.id)
   if (key === 'rename') return openRename(row)
@@ -1528,6 +1538,13 @@ function openPreview(item) {
 async function downloadPreviewItem(item) {
   previewOpen.value = false
   await startDownload(item.id)
+}
+
+/** 在线解压只对单卷 zip/rar/7z 开放，分卷与 tar 在 driveActions 里就不给入口。 */
+function openExtract(item) {
+  if (archiveEntryState(item) !== 'extractable') return
+  archiveItem.value = item
+  archiveOpen.value = true
 }
 
 function scheduleTasksRefresh() {

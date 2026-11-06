@@ -52,6 +52,7 @@ const ICONS = {
   sort: ['M4 7h12', 'M4 12h8', 'M4 17h4', 'M17 7v10', 'M14 14l3 3 3-3'],
   arrowUp: ['M12 19V6', 'M6 12l6-6 6 6'],
   arrowDown: ['M12 5v13', 'M6 12l6 6 6-6'],
+  archive: ['M3 4h18v5H3z', 'M5 9v11h14V9', 'M10 13h4'],
   check: ['M4 12l5 5 11-11'],
   x: ['M6 6l12 12', 'M18 6L6 18'],
   upload: ['M12 21V9', 'M7 13l5-5 5 5', 'M5 3h14'],
