@@ -8,7 +8,7 @@
   >
     <span
       class="flex h-5 w-5 items-center justify-center rounded border transition-colors"
-      :class="modelValue ? 'border-brand bg-brand text-white' : 'border-line bg-surface text-transparent'"
+      :class="modelValue ? 'border-brand-strong bg-brand-strong text-white' : 'border-line bg-surface text-transparent'"
     >
       <AppIcon name="check" :size="14" />
     </span>

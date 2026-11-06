@@ -44,7 +44,7 @@
             role="menuitemradio"
             :aria-checked="String(option.key === direction)"
             class="min-h-9 flex-1 rounded-md text-xs font-medium transition-colors"
-            :class="option.key === direction ? 'bg-brand text-white' : 'text-muted hover:bg-surface2 hover:text-ink'"
+            :class="option.key === direction ? 'bg-brand-strong text-white' : 'text-muted hover:bg-surface2 hover:text-ink'"
             @click="chooseDirection(option.key)"
           >
             {{ option.label }}

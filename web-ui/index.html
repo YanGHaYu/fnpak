@@ -4,7 +4,31 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f5f6f8" />
     <title>FNPak</title>
+    <style>
+      /* 首屏兜底背景：在样式表加载前就按有效主题铺色，避免深色用户看到白闪 */
+      html { background: #f5f6f8; }
+      html.dark { background: #0e141b; }
+      body { margin: 0; }
+    </style>
+    <script>
+      /* 挂载前同步写入主题：规则与 src/theme.js 保持一致（fnpak-theme → piko-theme → 系统） */
+      (function () {
+        try {
+          var stored = localStorage.getItem('fnpak-theme')
+          if (stored !== 'light' && stored !== 'dark' && stored !== 'system') {
+            var legacy = localStorage.getItem('piko-theme')
+            stored = legacy === 'light' || legacy === 'dark' ? legacy : 'system'
+          }
+          var dark = stored === 'dark' ||
+            (stored === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+          var meta = document.querySelector('meta[name="theme-color"]')
+          if (meta) meta.setAttribute('content', dark ? '#0e141b' : '#f5f6f8')
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

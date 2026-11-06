@@ -14,6 +14,10 @@
   --muted: #5d6b7a;
   --primary: #2563eb;
   --primary-soft: #e3edff;
+  /* 承载白色文字的实心按钮底色：深色主题下用更深的色阶，保证对比度 */
+  --brand-strong: #2563eb;
+  --danger-strong: #dc2626;
+  --warning-strong: #b45309;
   --danger: #dc2626;
   --danger-soft: #fdeaea;
   --warning: #b45309;
@@ -52,6 +56,9 @@
   --muted: #9aa8b8;
   --primary: #5b93ff;
   --primary-soft: #1b2c4d;
+  --brand-strong: #2f5fbf;
+  --danger-strong: #b91c1c;
+  --warning-strong: #a16207;
   --danger: #f87171;
   --danger-soft: #3a1d21;
   --warning: #fbbf24;
@@ -75,10 +82,13 @@
   --color-muted: var(--muted);
   --color-brand: var(--primary);
   --color-brand-soft: var(--primary-soft);
+  --color-brand-strong: var(--brand-strong);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+  --color-danger-strong: var(--danger-strong);
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
+  --color-warning-strong: var(--warning-strong);
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
   --font-sans: var(--font-sans);

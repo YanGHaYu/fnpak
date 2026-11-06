@@ -250,9 +250,10 @@
             <template #default="{ row }">
               <div
                 class="mb-2 overflow-hidden rounded-md border border-line bg-surface transition-colors hover:bg-surface2/60"
-                @touchstart.passive="startPress(groupPressTimer, () => enterGroupSelection(row))"
-                @touchend="cancelPress(groupPressTimer)"
-                @touchmove="cancelPress(groupPressTimer)"
+                @touchstart.passive="startGroupPress(row)"
+                @touchend="cancelGroupPress"
+                @touchmove="cancelGroupPress"
+                @click.capture="suppressClickAfterLongPress"
               >
                 <div class="grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 px-1.5 py-1.5 md:grid-cols-[auto_auto_minmax(0,1fr)_220px_90px_110px_auto]">
                   <AppCheckbox
@@ -402,9 +403,10 @@
             <template #default="{ row }">
               <div
                 class="mb-2 grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-surface px-1.5 py-1.5 transition-colors hover:bg-surface2 md:grid-cols-[auto_auto_minmax(0,1fr)_140px_190px_100px_auto]"
-                @touchstart.passive="startPress(offlinePressTimer, () => enterOfflineSelection(row))"
-                @touchend="cancelPress(offlinePressTimer)"
-                @touchmove="cancelPress(offlinePressTimer)"
+                @touchstart.passive="startOfflinePress(row)"
+                @touchend="cancelOfflinePress"
+                @touchmove="cancelOfflinePress"
+                @click.capture="suppressClickAfterLongPress"
               >
                 <AppCheckbox
                   :class="offlineSelectionMode ? '' : 'max-md:hidden'"
@@ -762,16 +764,40 @@ function startDrivePress(row) {
 function cancelDrivePress() {
   cancelPress(drivePressTimer)
 }
+function startGroupPress(row) {
+  startPress(groupPressTimer, () => enterGroupSelection(row))
+}
+function cancelGroupPress() {
+  cancelPress(groupPressTimer)
+}
+function startOfflinePress(row) {
+  startPress(offlinePressTimer, () => enterOfflineSelection(row))
+}
+function cancelOfflinePress() {
+  cancelPress(offlinePressTimer)
+}
+
+/* 长按结束后浏览器还会补发一次 click；800ms 内吞掉，避免误触展开/菜单/暂停/重试/取消/删除。 */
+let listLongPressAt = 0
+function suppressClickAfterLongPress(event) {
+  if (Date.now() - listLongPressAt < 800) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+}
+
 function enterDriveSelection(row) {
   driveLongPressAt = Date.now()
   driveSelectionMode.value = true
   if (!isDriveSelected(row)) toggleDriveRow(row, true)
 }
 function enterGroupSelection(row) {
+  listLongPressAt = Date.now()
   groupSelectionMode.value = true
   if (!isGroupSelected(row)) toggleGroupRow(row, true)
 }
 function enterOfflineSelection(row) {
+  listLongPressAt = Date.now()
   offlineSelectionMode.value = true
   if (!isOfflineSelected(row)) toggleOfflineRow(row, true)
 }
@@ -940,7 +966,7 @@ function activateDriveRow(row) {
     case 'preview': return openPreview(row)
     case 'extract': return openExtract(row)
     case 'torrent-open': return openTorrentDialog(row)
-    case 'download': return startDownload(row.id)
+    case 'download': return confirmRowDownload(row)
   }
 }
 
@@ -1137,6 +1163,30 @@ async function downloadFolder(row) {
 }
 
 const downloadsInFlight = new Set()
+const pendingRowDownloads = new Set()
+
+/**
+ * 整行点击「不可预览文件」先确认：文件名 + 大小 + 一句中性说明。
+ * 菜单里显式点「下载」不经过这里（用户已经在菜单里做了选择）。
+ */
+async function confirmRowDownload(row) {
+  if (!row?.id || pendingRowDownloads.has(row.id)) return
+  pendingRowDownloads.add(row.id)
+  try {
+    const name = row.name || row.id
+    const size = formatSize(row.sizeBytes) || '未知'
+    const ok = await confirmDialog({
+      title: '下载文件',
+      message: `文件：${name}\n大小：${size}\n该文件无法在浏览器内预览，是否下载到本机？`,
+      confirmText: '下载',
+      cancelText: '取消',
+    })
+    if (!ok) return
+    await startDownload(row.id)
+  } finally {
+    pendingRowDownloads.delete(row.id)
+  }
+}
 
 async function startDownload(fileId) {
   if (!fileId || downloadsInFlight.has(fileId)) return

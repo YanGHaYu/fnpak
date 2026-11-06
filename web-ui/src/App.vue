@@ -38,8 +38,8 @@
             {{ healthText }}
           </span>
           <AppIconButton
-            :icon="dark ? 'sun' : 'moon'"
-            :label="dark ? '切换到浅色' : '切换到深色'"
+            :icon="isDark ? 'sun' : 'moon'"
+            :label="isDark ? '切换到浅色' : '切换到深色'"
             @click="toggleTheme"
           />
           <router-link
@@ -79,7 +79,7 @@
           <span>{{ item.label }}</span>
           <span
             v-if="item.count"
-            class="absolute right-[22%] top-1.5 min-w-4 rounded-full bg-danger px-1 text-[10px] font-semibold leading-4 text-white"
+            class="absolute right-[22%] top-1.5 min-w-4 rounded-full bg-danger-strong px-1 text-[10px] font-semibold leading-4 text-white"
           >{{ item.count > 99 ? '99+' : item.count }}</span>
         </router-link>
       </div>
@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppConfirm from './components/ui/AppConfirm.vue'
 import AppIcon from './components/ui/AppIcon.vue'
@@ -100,12 +100,12 @@ import AppToast from './components/ui/AppToast.vue'
 import GateView from './views/GateView.vue'
 import SetupView from './views/SetupView.vue'
 import { tabCounts } from './counts'
+import { initTheme, isDark, toggleTheme } from './theme'
 import { refreshAccess, refreshHealth, refreshSetup, state } from './store'
 
 const route = useRoute()
 const router = useRouter()
 
-const dark = ref(false)
 let healthTimer = null
 
 const showNav = computed(() => state.accessOk === true && state.setup.needsSetup !== true)
@@ -125,20 +125,9 @@ const healthText = computed(() => {
   return `${state.health.version} · 运行 ${state.health.uptimeSeconds}s`
 })
 
-function applyTheme(value) {
-  dark.value = value
-  document.documentElement.classList.toggle('dark', value)
-  localStorage.setItem('fnpak-theme', value ? 'dark' : 'light')
-}
-
-function toggleTheme() {
-  applyTheme(!dark.value)
-}
-
 onMounted(async () => {
-  // 兼容旧版本：优先 fnpak-theme，读不到回退 piko-theme
-  const saved = localStorage.getItem('fnpak-theme') ?? localStorage.getItem('piko-theme')
-  applyTheme(saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches)
+  // 首屏已由 index.html 内联脚本应用；这里注册系统偏好监听（system 模式下运行期即时生效）
+  initTheme()
   await refreshHealth()
   await refreshSetup()
   if (state.setup.needsSetup !== true) await refreshAccess()

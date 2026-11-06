@@ -33,12 +33,12 @@ const props = defineProps({
 })
 
 const VARIANTS = {
-  primary: 'bg-brand text-white hover:bg-brand/90',
+  primary: 'bg-brand-strong text-white hover:bg-brand-strong/90',
   secondary: 'border border-line bg-surface text-ink hover:bg-surface2',
   ghost: 'text-muted hover:bg-surface2 hover:text-ink',
-  danger: 'bg-danger text-white hover:bg-danger/90',
+  danger: 'bg-danger-strong text-white hover:bg-danger-strong/90',
   'danger-soft': 'border border-danger/40 bg-danger-soft text-danger hover:bg-danger/10',
-  warning: 'bg-warning text-white hover:bg-warning/90',
+  warning: 'bg-warning-strong text-white hover:bg-warning-strong/90',
 }
 
 const variantClass = computed(() => VARIANTS[props.variant] || VARIANTS.secondary)

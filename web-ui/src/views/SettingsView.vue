@@ -1,6 +1,12 @@
 <template>
   <div class="space-y-3 md:space-y-4">
     <section class="card p-4">
+      <h2 class="mb-1 text-base font-semibold">外观</h2>
+      <p class="mb-3 text-xs text-muted">「跟随系统」会随设备的深浅色设置自动切换；手动选择后不再跟随系统。</p>
+      <AppSegmented v-model="themeMode" :options="themeOptions" />
+    </section>
+
+    <section class="card p-4">
       <header class="mb-3 flex flex-wrap items-center gap-2">
         <h2 class="text-base font-semibold">服务</h2>
         <span v-if="settings" class="rounded-full bg-surface2 px-2 py-0.5 text-xs text-muted">
@@ -146,15 +152,27 @@ import AppButton from '../components/ui/AppButton.vue'
 import AppField from '../components/ui/AppField.vue'
 import AppInput from '../components/ui/AppInput.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
+import AppSegmented from '../components/ui/AppSegmented.vue'
 import { toast } from '../components/ui/toast'
 import { api, errorDetail } from '../api'
 import { refreshAuth, state } from '../store'
+import { setThemeMode, themeState } from '../theme'
 
 const router = useRouter()
 const settings = ref(null)
 const loading = ref(false)
 const loadError = ref('')
 const logoutBusy = ref(false)
+
+const themeOptions = [
+  { key: 'system', label: '跟随系统' },
+  { key: 'light', label: '浅色' },
+  { key: 'dark', label: '深色' },
+]
+const themeMode = computed({
+  get: () => themeState.mode,
+  set: (mode) => setThemeMode(mode),
+})
 
 const newPasscode = ref('')
 const passcodeBusy = ref(false)
