@@ -392,8 +392,17 @@ private fun FileStat.toItem(): FileItem {
         durationMs = durationMs,
         hash = hash,
         mimeType = mimeType,
+        createdAtMs = isoEpochMillis(createdTime),
     )
 }
+
+/** PikPak 的时间是 ISO-8601 字符串（Z 或时区偏移）；排序只需 UTC 毫秒，解析失败按缺失处理。 */
+private fun isoEpochMillis(value: String): Long? =
+    try {
+        java.time.Instant.parse(value).toEpochMilli()
+    } catch (_: Exception) {
+        null
+    }
 
 private fun FileDetail.toResponse(): FileDetailResponse = FileDetailResponse(
     id = id,

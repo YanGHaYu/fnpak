@@ -65,6 +65,7 @@
           <span class="flex-1" />
           <AppButton size="sm" variant="ghost" :disabled="crumbs.length === 1" @click="up">上一级</AppButton>
           <AppButton size="sm" variant="ghost" icon="refresh" :loading="listBusy" @click="loadList">刷新</AppButton>
+          <DriveSortControl v-model:dimension="driveSort.dimension" v-model:direction="driveSort.direction" />
           <AppButton v-if="!driveSelectionMode && items.length" class="md:hidden" size="sm" variant="ghost" @click="driveSelectionMode = true">
             选择
           </AppButton>
@@ -86,7 +87,7 @@
         </nav>
 
         <div :class="driveSelection.length ? 'pb-28 md:pb-0' : ''">
-          <ProgressiveList :items="items" :step="40">
+          <ProgressiveList :items="sortedItems" :step="40">
             <template #default="{ row }">
               <div
                 class="mb-2 grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-surface px-1.5 py-1.5 transition-colors hover:bg-surface2 md:grid-cols-[auto_auto_minmax(0,1fr)_110px_150px_auto]"
@@ -509,6 +510,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DirTreePicker from '../components/DirTreePicker.vue'
+import DriveSortControl from '../components/DriveSortControl.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
 import RowActionMenu from '../components/RowActionMenu.vue'
 import ScrollName from '../components/ui/ScrollName.vue'
@@ -529,6 +531,7 @@ import AppSheet from '../components/ui/AppSheet.vue'
 import { confirmDialog } from '../components/ui/confirm'
 import { tabCounts } from '../counts'
 import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
+import { readDriveSort, saveDriveSort, sortDriveItems } from '../driveSort'
 import { refreshAuth, state } from '../store'
 
 const route = useRoute()
@@ -554,6 +557,13 @@ const tab = computed(() => tabFromRoute())
 const trashRef = ref(null)
 const crumbs = ref([{ id: '', name: '根目录' }])
 const items = ref([])
+// 排序只作用于目录列表的展示数据源；items 本身保持接口原序，供全选/选中按 id 使用。
+const driveSort = reactive(readDriveSort())
+const sortedItems = computed(() => sortDriveItems(items.value, driveSort.dimension, driveSort.direction))
+watch(
+  () => [driveSort.dimension, driveSort.direction],
+  () => saveDriveSort({ ...driveSort }),
+)
 const listStatus = ref('')
 const listHint = ref('只展示第一页；文件与文件夹都能勾选，混合下载会合并成一个批次（文件夹先递归扫描）。')
 const listBusy = ref(false)

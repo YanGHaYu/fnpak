@@ -12,6 +12,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import AppButton from './AppButton.vue'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -35,21 +36,31 @@ function more() {
   limit.value += props.step
 }
 
-onMounted(() => {
-  if (typeof IntersectionObserver === 'undefined' || !sentinel.value) return
+// 首次挂载时列表通常为空（哨兵不存在），需要等哨兵出现后再建立观察者。
+function ensureObserver() {
+  if (observer || typeof IntersectionObserver === 'undefined') return
   observer = new IntersectionObserver(
     (entries) => {
       if (entries.some((entry) => entry.isIntersecting)) more()
     },
     { rootMargin: '200px' },
   )
-  observer.observe(sentinel.value)
+}
+
+onMounted(() => {
+  if (typeof IntersectionObserver === 'undefined' || !sentinel.value) return
+  ensureObserver()
+  observer?.observe(sentinel.value)
 })
 
 watch(sentinel, (element, previous) => {
-  if (!observer) return
-  if (previous) observer.unobserve(previous)
-  if (element) observer.observe(element)
+  if (!element) {
+    if (previous) observer?.unobserve(previous)
+    return
+  }
+  ensureObserver()
+  if (previous) observer?.unobserve(previous)
+  observer?.observe(element)
 })
 
 onUnmounted(() => observer?.disconnect())

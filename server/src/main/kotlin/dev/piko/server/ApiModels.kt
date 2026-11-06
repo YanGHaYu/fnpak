@@ -156,6 +156,8 @@ data class FileItem(
     val durationMs: Long? = null,
     val hash: String? = null,
     val mimeType: String? = null,
+    // 列表页排序用：PikPak createdTime 解析出的 UTC epoch 毫秒，无法解析时为 null
+    val createdAtMs: Long? = null,
 )
 
 @Serializable
