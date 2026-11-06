@@ -24,6 +24,7 @@ import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -36,6 +37,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "Download"
 private const val USER_AGENT =
@@ -81,11 +83,30 @@ class DownloadTuning(
  * 不用 `Semaphore` 是因为上限要在运行期改（设置页），而 `Semaphore` 的许可数固定；这里的等待者
  * 由自己排队，唤醒时直接把名额移交，活跃数不会短暂超过上限。
  */
-class ConnectionBudget(initialLimit: Int) {
+class ConnectionBudget(
+    initialLimit: Int,
+    /** 等待者超过这个时长还没拿到名额时，做一次「持有者协程已结束」的残留名额回收。 */
+    private val reclaimAfterMs: Long = RECLAIM_AFTER_MS,
+) {
+    /**
+     * 一次申请到的名额。归还幂等：被自愈回收之后，原持有者的 `finally` 再归还也不会多减。
+     * 记下持有者 [owner]，自愈时只回收「协程已经结束」的名额，仍在传输的不会被误收。
+     */
+    class Permit internal constructor(internal val owner: Job?) {
+        internal val granted = CompletableDeferred<Unit>()
+        internal val released = AtomicBoolean(false)
+    }
+
     private val lock = Mutex()
-    private var active = 0
     private var limit = initialLimit.coerceIn(1, 128)
-    private val waiters = ArrayDeque<CompletableDeferred<Unit>>()
+    private val held = mutableSetOf<Permit>()
+    private val waiters = ArrayDeque<Permit>()
+
+    @Volatile
+    private var active = 0
+
+    @Volatile
+    private var waitingCount = 0
 
     @Volatile
     private var peakActive = 0
@@ -94,41 +115,116 @@ class ConnectionBudget(initialLimit: Int) {
     val peak: Int get() = peakActive
     val max: Int get() = limit
 
-    suspend fun acquire() {
-        val waiter: CompletableDeferred<Unit>? = lock.withLock {
-            if (active < limit) {
-                active++
-                if (active > peakActive) peakActive = active
-                null
+    /** 正在等名额的分段数：正常下载里接近 0，长期大于 0 说明名额可能没还回来。 */
+    val waiting: Int get() = waitingCount
+
+    suspend fun acquire(): Permit {
+        val permit = Permit(currentCoroutineContext()[Job])
+        val queued = lock.withLock {
+            if (held.size < limit) {
+                grantLocked(permit)
+                false
             } else {
-                CompletableDeferred<Unit>().also { waiters.addLast(it) }
+                waiters.addLast(permit)
+                waitingCount = waiters.size
+                true
             }
         }
-        waiter?.await()
+        if (!queued) return permit
+        try {
+            while (true) {
+                // 正常下载名额是「释放即移交」，等待者几乎不会真的等这么久；能走到这里说明有
+                // 持有者的协程已经结束却没把名额还回来（取消路径漏归还、进程内遗留等）。
+                if (withTimeoutOrNull(reclaimAfterMs) { permit.granted.await() } != null) return permit
+                reclaimOrphans()
+            }
+        } catch (e: CancellationException) {
+            // 取消时必须把等待者从队列里摘掉：否则 release() 会把名额移交给一个已经没人等待的
+            // Deferred，active 永远减不下去，之后所有分段都卡在申请名额（任务停在 DOWNLOADING 0 字节，
+            // 后面的任务一直 PENDING）。
+            withContext(NonCancellable) {
+                if (permit.granted.isCompleted) {
+                    // 已经被 release() 移交（名额记到了这个等待者头上）：自己再还回去
+                    release(permit)
+                } else {
+                    lock.withLock {
+                        waiters.remove(permit)
+                        waitingCount = waiters.size
+                    }
+                }
+            }
+            throw e
+        }
     }
 
-    suspend fun release() {
+    /** 归还名额；等待队列非空时直接把名额移交给下一个人，不先减再加。 */
+    suspend fun release(permit: Permit) = withContext(NonCancellable) {
+        if (!permit.released.compareAndSet(false, true)) return@withContext
         val next = lock.withLock {
-            if (waiters.isEmpty()) {
-                if (active > 0) active--
-                null
+            if (held.remove(permit)) {
+                active--
+                if (waiters.isEmpty()) null else waiters.removeFirst().also {
+                    waitingCount = waiters.size
+                    grantLocked(it)
+                }
             } else {
-                // 名额直接移交，不先减再加：否则两个等待者会同时被放进来
-                waiters.removeFirst()
+                // 已被自愈回收，名额已经还过了
+                null
             }
         }
-        next?.complete(Unit)
+        next?.granted?.complete(Unit)
     }
 
     suspend fun updateLimit(value: Int) {
+        val wake = mutableListOf<Permit>()
         lock.withLock {
             limit = value.coerceIn(1, 128)
-            while (active < limit && waiters.isNotEmpty()) {
-                active++
-                if (active > peakActive) peakActive = active
-                waiters.removeFirst().complete(Unit)
+            while (held.size < limit && waiters.isNotEmpty()) {
+                wake += waiters.removeFirst().also { grantLocked(it) }
+                waitingCount = waiters.size
             }
         }
+        wake.forEach { it.granted.complete(Unit) }
+    }
+
+    /**
+     * 回收「持有者协程已经结束」的名额，并把腾出来的名额移交给等待者。
+     * 只在有等待者等到超时才调用：健康下载不会走到这里，真正传输中的分段协程也还在活跃，
+     * 不会被误收。返回回收了几个。
+     */
+    suspend fun reclaimOrphans(): Int {
+        var reclaimed = 0
+        val wake = mutableListOf<Permit>()
+        lock.withLock {
+            for (permit in held.toList()) {
+                if (permit.owner?.isActive != true) {
+                    held.remove(permit)
+                    permit.released.set(true)
+                    active--
+                    reclaimed++
+                }
+            }
+            while (held.size < limit && waiters.isNotEmpty()) {
+                wake += waiters.removeFirst().also { grantLocked(it) }
+                waitingCount = waiters.size
+            }
+        }
+        wake.forEach { it.granted.complete(Unit) }
+        if (reclaimed > 0) {
+            PikoLog.w(TAG, "连接预算自愈：回收 $reclaimed 个已结束协程占用的名额，当前 $active/$limit，等待 ${waiters.size}")
+        }
+        return reclaimed
+    }
+
+    private fun grantLocked(permit: Permit) {
+        held += permit
+        active++
+        if (active > peakActive) peakActive = active
+    }
+
+    companion object {
+        /** 正常分段申请名额是毫秒级；等待超过这个时长才做一次自愈回收，避免误伤健康下载。 */
+        const val RECLAIM_AFTER_MS = 30_000L
     }
 }
 
@@ -232,11 +328,11 @@ class SegmentDownloader(
                 val from = panel.start + book.written(panel.index)
                 if (from > panel.end) return
                 try {
-                    budget.acquire()
+                    val permit = budget.acquire()
                     try {
                         fetchRange(channel, holder, from, panel.end) { bytes -> book.add(panel.index, bytes) }
                     } finally {
-                        budget.release()
+                        budget.release(permit)
                     }
                     attempts = 0
                     // 一段刚下完就落一次续传点，不必等下一个 5 秒周期
@@ -275,13 +371,13 @@ class SegmentDownloader(
                 val from = panel.start + book.written(panel.index)
                 if (from > panel.end) break
                 try {
-                    budget.acquire()
+                    val permit = budget.acquire()
                     try {
                         book.setActive(panel.index, true)
                         fetchRange(channel, holder, from, panel.end) { bytes -> book.add(panel.index, bytes) }
                     } finally {
                         book.setActive(panel.index, false)
-                        budget.release()
+                        budget.release(permit)
                     }
                     onCheckpoint(book.spans())
                 } catch (expired: LinkExpired) {
