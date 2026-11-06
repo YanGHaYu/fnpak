@@ -2,6 +2,20 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.8.2 — 排队中永久卡死修复（调度自愈）
+
+- 现象（线上实机）：3 个任务 2 个完成、1 个永久停在「排队中」（PENDING），暂停再继续、单条重试都不生效；重启应用后立即恢复——说明卡住状态只存在于进程内
+- 根因：`PikoDownloadCoordinator.launchTracked` 先把任务登记写入 `jobs[taskId]`，再调用 `job.start()`；暂停/取消恰好落在两步之间时，LAZY 协程从未真正启动，`finally` 收尾不执行，`jobs` 留下一条永不结束的死登记。该登记同时造成两件事：占住 `BATCH_PARALLEL - jobs.size` 的并发位；且 `pumpQueue` 用 `taskId !in jobs.value` 过滤派发，导致同名任务永远不被调度。重试/暂停继续只把状态改回 PENDING，不会唤醒调度器，于是永久排队；重启清空 `jobs` 才恢复
+- 并存路径：`ConnectionBudget.acquire()` 在等待中被取消时不摘除等待者，取消态 `release()` 又直接丢名额，`active` 可被永久钉在上限
+- 修复：
+  - `SegmentDownloader` 的连接预算改为 `Permit` 句柄（幂等归还、记录持有者协程）：`acquire` 取消时清理等待者，`release` 在 `NonCancellable` 内归还；新增 `reclaimOrphans()` 只回收「持有者协程已结束」的名额，等待超过 `RECLAIM_AFTER_MS = 30s` 触发一次回收
+  - `PikoDownloadCoordinator` 的任务登记收尾改 `invokeOnCompletion`（协程未 start 也执行清理）；对 PENDING 任务重试时主动 `pumpQueue()`
+  - 新增 10s 周期看门狗 `reconcileQueue()`（`QUEUE_WATCHDOG_INTERVAL_MS`）：清掉已完成任务的残留登记、把 DOWNLOADING 但协程已结束的任务回 PENDING 续传、有空位则补调度——即使名额/登记被异常路径破坏，也能在下个 tick 自愈，不再需要重启
+- 兜底不误伤正常下载：回收只看「持有者协程是否已结束」（活跃持有者 1.5s 采样不被回收），健康分段获取远低于 30s 窗口；看门狗只做一致性校正，不归零真实占用
+- 验收：`StallBench`（test 源集，不进安装包）覆盖暂停/继续、名额泄漏、登记残留、取消四场景全部 PASS（泄漏自愈 2397 ms、残留登记 8242 ms 自愈、取消后名额采样全 0）；`RetryBench` 全通过（重试、`completedRanges` 不被清、暂停/继续、取消、批量重试）
+- 说明：截图实测「每任务分段数 8 / 全局连接预算 32」，3×8=24<32，默认配置不会因等名额而卡；触发条件是上述登记竞态与预算泄漏路径
+- 版本 `0.8.2`（manifest / `ServerConfig` / `/api/health` / `package.json` 与构建产出一致）
+
 ## 0.8.1 — 移动端长名称与行内按钮修复
 
 - 行内操作按钮固定在行尾：菜单触发器 `shrink-0`，名称区占据剩余空间并允许收缩（`min-width: 0`），按钮与整行等高对齐、永远贴行右边缘

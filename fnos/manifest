@@ -1,5 +1,5 @@
 appname=fnpak
-version=0.8.1
+version=0.8.2
 display_name=FNPak
 desc=PikPak 第三方 NAS 客户端 · 非官方：Web UI 浏览云盘、磁力/分享入库、离线任务与下载。
 source=thirdparty
@@ -21,7 +21,8 @@ desktop_applaunchname=fnpak.main
 
 disable_authorization_path=false
 
-changelog=0.8.1: 移动端行式列表修复（纯前端，API/SSE 不变）：行内操作按钮固定行尾（shrink-0）并与整行等高对齐；文件名/文件夹名超长不再把按钮挤出行范围或挤出屏幕，改为在名称区内单行横向滚动（移动端隐藏滚动条），整行不横向滚动；名称区横向拖动超过阈值不触发进入目录/展开任务，轻点仍可打开，按钮点击命中正常；覆盖目录、本机下载（父任务行与展开子项）、离线任务、回收站四类列表；桌面端保留省略号（悬停 title 看全名）；根因是窄屏网格隐藏 checkbox 后自动放置错位，菜单列落入 1fr 名称轨道被长名称挤出。
+changelog=0.8.2: 修复部分任务永久停在「排队中」（重启才恢复）：任务登记在协程真正启动前写入，暂停/取消恰好落在两步之间时协程不执行、清理逻辑不跑，残留登记永久占用并发位且按 taskId 过滤使该任务永远不被调度，重试/暂停继续只改状态不唤醒调度；修复为登记收尾改 invokeOnCompletion（未启动也清理）、PENDING 重试主动 pumpQueue、新增 10s 周期看门狗清理残留登记并把协程已结束的 DOWNLOADING 任务回 PENDING 续传；ConnectionBudget 名额改为 Permit 句柄，取消时摘除等待者、release 在 NonCancellable 中归还，并只回收持有者协程已结束的名额，实测泄漏 2.4s、残留登记 8.2s 内自愈，无需重启。
+0.8.1: 移动端行式列表修复（纯前端，API/SSE 不变）：行内操作按钮固定行尾（shrink-0）并与整行等高对齐；文件名/文件夹名超长不再把按钮挤出行范围或挤出屏幕，改为在名称区内单行横向滚动（移动端隐藏滚动条），整行不横向滚动；名称区横向拖动超过阈值不触发进入目录/展开任务，轻点仍可打开，按钮点击命中正常；覆盖目录、本机下载（父任务行与展开子项）、离线任务、回收站四类列表；桌面端保留省略号（悬停 title 看全名）；根因是窄屏网格隐藏 checkbox 后自动放置错位，菜单列落入 1fr 名称轨道被长名称挤出。
 0.8.0: UI 重构（纯前端，API 契约不变）：移除 Element Plus，改用 Tailwind CSS v4 + reka-ui 自建轻量组件层（Button/IconButton/Dialog/Sheet/Popover/Menu/Checkbox/Toast/Progress/Skeleton/Tabs）；设计 token 化（颜色/间距/字号/圆角/阴影 CSS 变量），明暗主题沿用 fnpak-theme 并回退 piko-theme；统一 AppShell：桌面顶部品牌+Tab+设置入口、移动端底部四 Tab（目录/本机下载/离线任务/回收站）与安全区；目录、本机下载、离线任务、回收站统一为行式卡片列表，多选行首 checkbox（移动长按进入选择模式），批量条移动端贴底、桌面悬浮且不遮最后一行；行内 ⋯ 浮层桌面 hover、移动点击，已完成行不显示下载控制；320+ 项与展开子项改为增量渲染并保留 childCount 补拉；SSE 仍按 id merge；播放器移动端全屏；触控目标 ≥44px、focus ring、esc/遮罩关闭；构建产物离线自包含；窄屏批量条压缩为两行（信息+按钮）且不遮最后一行，修复下载组移动端元信息多余分隔符；默认构建改为 fpk-only：不带 -P 属性只需 JDK 21，桌面模块需 -Pfnpak.full=true 与 JDK 25（源码保留原位）。
 0.7.1: 只重试失败项：新增单条与批量重试接口（POST /api/downloads/{id}/retry、POST /api/downloads/groups/{id}/retry），只挑失败/中断的子项，已完成与下载中/排队中的不动；重试复用 completedRanges 只补未完成区间，并重新获取直链（不复用过期签名）；运行或排队中重试返回 409 可读提示，不产生重复任务；失败原因可读化（HTTP 状态、直链失效、云端 404、磁盘空间不足、下载目录不可写）；子项行内菜单新增「重试」（仅失败态）与批量条「重试失败项 (N)」，SSE 进度事件新增 error 字段。
 0.7.0: 更名为 FNPak（PikPak 第三方 NAS 客户端 · 非官方）：appname 由 piko 改为 fnpak，安装目录变为 /var/apps/fnpak，可执行/构件名改为 fnpak-server，桌面入口 key 改为 fnpak.main；内部 Kotlin 包名 dev.piko.* 沿用上游以降低同步冲突；服务端日志前缀、Cookie、媒体头与前端标题同步更名；旧用户迁移见 README（复制 var 下的 access-token/settings.json/download-tasks.json，或重新设置口令与下载位置）。
