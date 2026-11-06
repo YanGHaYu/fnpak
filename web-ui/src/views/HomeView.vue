@@ -500,6 +500,13 @@
 
     <ArchiveDialog v-model="archiveOpen" :item="archiveItem" @done="loadList()" />
 
+    <TorrentDialog
+      v-model="torrentOpen"
+      :item="torrentItem"
+      :parent-id="currentParentId"
+      @saved="loadTasks()"
+    />
+
     <!-- 移动端批量操作抽屉（桌面用行内浮层） -->
     <AppSheet v-model:open="batchSheet" title="批量操作">
       <div class="space-y-2">
@@ -518,6 +525,7 @@ import DriveSortControl from '../components/DriveSortControl.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
 import ArchiveDialog from '../components/ArchiveDialog.vue'
 import PreviewDialog from '../components/PreviewDialog.vue'
+import TorrentDialog from '../components/TorrentDialog.vue'
 import RowActionMenu from '../components/RowActionMenu.vue'
 import ScrollName from '../components/ui/ScrollName.vue'
 import TrashView from './TrashView.vue'
@@ -540,6 +548,8 @@ import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
 import { readDriveSort, saveDriveSort, sortDriveItems } from '../driveSort'
 import { previewKindFor } from '../preview'
 import { archiveEntryState } from '../archive'
+import { openTorrent, saveOfflineLink, torrentEntryState, torrentErrorText } from '../torrent'
+import { toast } from '../components/ui/toast'
 import { refreshAuth, state } from '../store'
 
 const route = useRoute()
@@ -645,6 +655,8 @@ const previewOpen = ref(false)
 const previewItem = ref(null)
 const archiveOpen = ref(false)
 const archiveItem = ref(null)
+const torrentOpen = ref(false)
+const torrentItem = ref(null)
 
 const activeGroupCount = computed(() =>
   groups.value.filter((group) => ['SCANNING', 'QUEUED', 'DOWNLOADING'].includes(group.status)).length,
@@ -1196,6 +1208,10 @@ function driveActions(row) {
   if (archiveEntryState(row) === 'extractable') {
     actions.push({ key: 'extract', label: '解压', icon: 'archive', hint: `在线解压「${row.name || row.id}」到当前目录` })
   }
+  if (torrentEntryState(row)) {
+    actions.push({ key: 'torrent-open', label: '打开', icon: 'link', hint: `查看「${row.name || row.id}」的文件清单` })
+    actions.push({ key: 'torrent-offline', label: '离线下载', icon: 'download', hint: '解析后直接提交到云端离线，不先展示清单' })
+  }
   if (row.isFolder) {
     actions.push({ key: 'download-folder', label: '下载文件夹', icon: 'folder', hint: '递归下载整个文件夹' })
   } else {
@@ -1212,6 +1228,8 @@ async function onDriveAction(row, key) {
   if (key === 'play') return openPlayer(row)
   if (key === 'preview') return openPreview(row)
   if (key === 'extract') return openExtract(row)
+  if (key === 'torrent-open') return openTorrentDialog(row)
+  if (key === 'torrent-offline') return directTorrentOffline(row)
   if (key === 'download-folder') return downloadFolder(row)
   if (key === 'download') return startDownload(row.id)
   if (key === 'rename') return openRename(row)
@@ -1545,6 +1563,31 @@ function openExtract(item) {
   if (archiveEntryState(item) !== 'extractable') return
   archiveItem.value = item
   archiveOpen.value = true
+}
+
+/** 「打开」先解析文件清单；「离线下载」跳过弹层，解析出 magnet 后直接提交。 */
+function openTorrentDialog(item) {
+  if (!torrentEntryState(item)) return
+  torrentItem.value = item
+  torrentOpen.value = true
+}
+
+async function directTorrentOffline(item) {
+  toast('正在解析种子…', 'info', 8000)
+  const info = await openTorrent(item.id)
+  if (!info.ok) {
+    toast.error(torrentErrorText(info))
+    return
+  }
+  const result = await saveOfflineLink(info.data?.magnet || '', currentParentId.value)
+  if (!result.ok) {
+    toast.error(torrentErrorText(result))
+    return
+  }
+  toast.success(result.data?.instantComplete
+    ? `已秒传：${result.data.fileId || '（未知）'}`
+    : `已提交离线任务：${result.data?.taskId || '（无任务 ID）'}`)
+  await loadTasks()
 }
 
 function scheduleTasksRefresh() {

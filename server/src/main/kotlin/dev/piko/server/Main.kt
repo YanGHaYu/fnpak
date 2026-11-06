@@ -11,6 +11,7 @@ import dev.piko.server.drive.driveRoutes
 import dev.piko.server.events.sseRoutes
 import dev.piko.server.links.linkRoutes
 import dev.piko.server.archive.archiveRoutes
+import dev.piko.server.links.torrentRoutes
 import dev.piko.server.media.mediaRoutes
 import dev.piko.server.settings.settingsRoutes
 import dev.piko.server.tasks.taskRoutes
@@ -128,6 +129,7 @@ fun Application.installServer(graph: ServiceGraph, setup: AccessSetup) {
         downloadRoutes(graph)
         mediaRoutes(graph)
         archiveRoutes(graph)
+        torrentRoutes(graph)
         sseRoutes(graph)
         staticRoutes()
     }
