@@ -106,22 +106,28 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     val downloadTuning = DownloadTuning(
         segments = settings.segmentCount,
         maxConnections = settings.maxConnections,
+        dualSignedUrls = settings.dualSignedUrls,
+        downloadDiagnostics = settings.downloadDiagnostics,
     )
 
     val connectionBudget = ConnectionBudget(settings.maxConnections)
+
+    /** 取一次文件详情并挑出可用直链；同一文件再取一次会拿到另一份签名（同签名时第二 lane 自动放弃）。 */
+    private val directUrlProvider: suspend (String) -> String = { fileId ->
+        driveRepository.getFileDetail(fileId).getOrThrow().let { detail ->
+            detail.downloadUrl?.takeIf { it.isNotBlank() }
+                ?: detail.webContentLink?.takeIf { it.isNotBlank() }
+                ?: error("PikPak 没有返回可用的下载直链")
+        }
+    }
 
     /**
      * 分段直链下载：原画整文件任务全走它，绕开 SDK 的稀疏暂存。直链只在任务开始时取一次，
      * 段内 401/403 时由它自己按 `fileId` 重新取。
      */
     private val directDownloader = SegmentDownloader(
-        urlProvider = { fileId ->
-            driveRepository.getFileDetail(fileId).getOrThrow().let { detail ->
-                detail.downloadUrl?.takeIf { it.isNotBlank() }
-                    ?: detail.webContentLink?.takeIf { it.isNotBlank() }
-                    ?: error("PikPak 没有返回可用的下载直链")
-            }
-        },
+        urlProvider = directUrlProvider,
+        secondUrlProvider = directUrlProvider,
         budget = connectionBudget,
         tuning = downloadTuning,
     )

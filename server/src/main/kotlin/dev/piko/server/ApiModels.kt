@@ -43,6 +43,10 @@ data class SettingsResponse(
     val segmentCount: Int = 8,
     /** 所有任务共用的连接预算。 */
     val maxConnections: Int = 32,
+    /** 同一文件是否并行使用第二条签名直链。 */
+    val dualSignedUrls: Boolean = false,
+    /** 下载诊断指标日志是否开启。 */
+    val downloadDiagnostics: Boolean = false,
 )
 
 @Serializable
@@ -76,11 +80,13 @@ data class DownloadDirRequest(
 @Serializable
 data class DownloadDirResponse(val downloadDir: String)
 
-/** 分段下载参数：段数 1–32，全局连接预算 4–64。 */
+/** 分段下载参数：段数 1–32，全局连接预算 4–64；两个加速开关为 null 时保持原值。 */
 @Serializable
 data class DownloadTuningRequest(
     val segments: Int = 8,
     val maxConnections: Int = 32,
+    val dualSignedUrls: Boolean? = null,
+    val downloadDiagnostics: Boolean? = null,
 )
 
 /** 保存后的实际生效值；返回 200+JSON 而不是 204，前端可直接把回包当确认。 */
@@ -88,6 +94,8 @@ data class DownloadTuningRequest(
 data class DownloadTuningResponse(
     val segments: Int,
     val maxConnections: Int,
+    val dualSignedUrls: Boolean = false,
+    val downloadDiagnostics: Boolean = false,
 )
 
 @Serializable

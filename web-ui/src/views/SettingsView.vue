@@ -119,7 +119,19 @@
         分段数决定单个文件并发几条 Range 连接；连接预算是所有任务的总上限（活跃任务 × 每任务段数不会再直接放大成连接数）。
         改完对**新任务**生效，已在跑的任务沿用启动时的段数。
       </p>
-      <p v-if="tuningStatus" class="mt-1 text-xs" :class="tuningError ? 'text-danger' : 'text-muted'">
+      <div class="mt-3 rounded-md border border-line bg-surface2 p-3">
+        <div class="flex items-start gap-2">
+          <AppCheckbox v-model="dualSignedUrls" label="双直链加速" class="shrink-0" />
+          <div class="min-h-11 flex-1 cursor-pointer py-2" @click="dualSignedUrls = !dualSignedUrls">
+            <p class="text-sm font-medium">双直链加速（默认关闭）</p>
+            <p class="mt-1 text-xs text-muted">
+              开启后同一文件再取一条签名直链并行分段，占用双倍分段连接（如 8→16），仍受全局连接预算约束。
+              仅在两条直链签名不同时才生效；真实网络提速幅度未验证，账号级限速时可能完全无效。
+            </p>
+          </div>
+        </div>
+      </div>
+      <p v-if="tuningStatus" class="mt-2 text-xs" :class="tuningError ? 'text-danger' : 'text-muted'">
         {{ tuningStatus }}
       </p>
     </section>
@@ -149,6 +161,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppAlert from '../components/ui/AppAlert.vue'
 import AppButton from '../components/ui/AppButton.vue'
+import AppCheckbox from '../components/ui/AppCheckbox.vue'
 import AppField from '../components/ui/AppField.vue'
 import AppInput from '../components/ui/AppInput.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
@@ -192,6 +205,7 @@ const dirError = ref(false)
 
 const segments = ref('8')
 const maxConnections = ref('32')
+const dualSignedUrls = ref(false)
 const tuningBusy = ref(false)
 const tuningStatus = ref('')
 const tuningError = ref(false)
@@ -218,6 +232,7 @@ async function loadAll() {
   settings.value = result.data
   segments.value = String(result.data.segmentCount ?? 8)
   maxConnections.value = String(result.data.maxConnections ?? 32)
+  dualSignedUrls.value = !!result.data.dualSignedUrls
   await loadShares()
 }
 
@@ -293,6 +308,7 @@ async function saveTuning() {
     body: JSON.stringify({
       segments: Number(segments.value),
       maxConnections: Number(maxConnections.value),
+      dualSignedUrls: dualSignedUrls.value,
     }),
   })
   tuningBusy.value = false
@@ -301,7 +317,8 @@ async function saveTuning() {
     tuningError.value = true
     return
   }
-  tuningStatus.value = `已保存：每任务 ${result.data.segments} 段，全局连接上限 ${result.data.maxConnections}（新任务生效）`
+  tuningStatus.value = `已保存：每任务 ${result.data.segments} 段，全局连接上限 ${result.data.maxConnections}，` +
+    `双直链加速${result.data.dualSignedUrls ? '已开启' : '已关闭'}（新任务生效）`
   await loadAll()
 }
 

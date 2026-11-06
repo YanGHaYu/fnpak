@@ -1,5 +1,5 @@
 appname=fnpak
-version=0.9.1
+version=0.9.2
 display_name=FNPak
 desc=PikPak 第三方 NAS 客户端 · 非官方：Web UI 浏览云盘、磁力/分享入库、离线任务与下载。
 source=thirdparty
@@ -21,7 +21,8 @@ desktop_applaunchname=fnpak.main
 
 disable_authorization_path=false
 
-changelog=0.9.1: UI 交互改进（无接口变更）：目录行整行可点并统一动作分发——文件夹进目录、视频直接播放、图片/音频/PDF/文本直接预览、单卷压缩包直接解压、.torrent 直接打开种子清单、不可预览文件点行先确认（文件名+大小+中性说明）再下载，菜单内「下载」仍直接开始；勾选框、行尾⋯、菜单/弹层与移动端名称横滑不误触，键盘 Enter/Space 等效，连点 600ms 去重并复用下载在途锁。主题新增 system/light/dark 三态，默认跟随系统，监听 prefers-color-scheme 运行期即时生效，挂载前内联脚本写入根元素与 meta theme-color（深色首屏不再白闪），保留 fnpak-theme 显式设置并回退 piko-theme；深色下确认框/菜单/输入/进度/失败行/勾选框对比度修正。修复本机下载父任务行与离线任务行的长按多选：模板把 ref 直接传给 startPress 导致每次 touchstart 抛 Cannot read properties of null，现按目录行同一写法包一层，并在长按后 800ms 内吞掉浏览器补发的 click，避免误触展开/暂停/重试/取消/删除。已知边界：下载子项行暂不支持长按多选（无子项选择态）；主题默认跟随系统，页头按钮为显式浅/深切换，三态选择在设置页。
+changelog=0.9.2: 新增「双直链加速」（默认关闭，设置页手动开启）：同一文件再取一条签名直链并行分段，每任务分段连接数按设定值翻倍（默认 8→16），仍受全局连接预算约束；仅当两条直链签名（path + 排序后 query）不同时才启用，同签名自动回退单 lane，第二 lane 失败/403 自动降级为主 lane 续传；不改下载产物与断点续传格式，ConnectionBudget 语义未变。假 CDN 实测（32 MiB / 每连接 400 KiB/s / 单 URL 8 连接上限）单 lane 16.2s → 双 lane 9.5s（约 +70%）；真实账号 A/B 未验证，账号级或单 IP 限速时可能完全无效。下载诊断指标（downloadDiagnostics）默认关闭且不在 Web UI 暴露。Phase 2/3/4（滑窗分段、自适应 worker、SDK 升级）未做。
+0.9.1: UI 交互改进（无接口变更）：目录行整行可点并统一动作分发——文件夹进目录、视频直接播放、图片/音频/PDF/文本直接预览、单卷压缩包直接解压、.torrent 直接打开种子清单、不可预览文件点行先确认（文件名+大小+中性说明）再下载，菜单内「下载」仍直接开始；勾选框、行尾⋯、菜单/弹层与移动端名称横滑不误触，键盘 Enter/Space 等效，连点 600ms 去重并复用下载在途锁。主题新增 system/light/dark 三态，默认跟随系统，监听 prefers-color-scheme 运行期即时生效，挂载前内联脚本写入根元素与 meta theme-color（深色首屏不再白闪），保留 fnpak-theme 显式设置并回退 piko-theme；深色下确认框/菜单/输入/进度/失败行/勾选框对比度修正。修复本机下载父任务行与离线任务行的长按多选：模板把 ref 直接传给 startPress 导致每次 touchstart 抛 Cannot read properties of null，现按目录行同一写法包一层，并在长按后 800ms 内吞掉浏览器补发的 click，避免误触展开/暂停/重试/取消/删除。已知边界：下载子项行暂不支持长按多选（无子项选择态）；主题默认跟随系统，页头按钮为显式浅/深切换，三态选择在设置页。
 0.9.0: 新增四块功能：目录 Tab 排序（时间/名称/类型 × 正序/倒序，默认时间倒序且文件夹恒定在前，localStorage 持久化，数据源补充 createdAtMs）；在线预览（图片/音频/视频/PDF/纯文本与代码/Markdown，文本走同源代理 Range 0-1MB 并支持 UTF-8/GBK 解码与二进制嗅探，Markdown 经 DOMPurify 净化）；在线解压（zip/rar/7z 单卷，服务端串行提交与 500ms×60s 轮询，密码只进 POST body、错误可重输，分卷与 tar 不显示入口）；种子打开/离线（自研 bencode 不引第三方库，infohash 用 info 原始字节 SHA-1，防护 10MB/嵌套/1 万文件/溢出，BT v2 暂不支持，无官方 torrent 上传接口，加入离线复用磁力链路）。修复 ProgressiveList 两处问题：补 AppButton 导入、哨兵出现后再懒建 IntersectionObserver，使加载更多可用。目录排序只覆盖已取回的一页（≤100 项），第 101 项之后不参与排序。
 0.8.2: 修复部分任务永久停在「排队中」（重启才恢复）：任务登记在协程真正启动前写入，暂停/取消恰好落在两步之间时协程不执行、清理逻辑不跑，残留登记永久占用并发位且按 taskId 过滤使该任务永远不被调度，重试/暂停继续只改状态不唤醒调度；修复为登记收尾改 invokeOnCompletion（未启动也清理）、PENDING 重试主动 pumpQueue、新增 10s 周期看门狗清理残留登记并把协程已结束的 DOWNLOADING 任务回 PENDING 续传；ConnectionBudget 名额改为 Permit 句柄，取消时摘除等待者、release 在 NonCancellable 中归还，并只回收持有者协程已结束的名额，实测泄漏 2.4s、残留登记 8.2s 内自愈，无需重启。
 0.8.1: 移动端行式列表修复（纯前端，API/SSE 不变）：行内操作按钮固定行尾（shrink-0）并与整行等高对齐；文件名/文件夹名超长不再把按钮挤出行范围或挤出屏幕，改为在名称区内单行横向滚动（移动端隐藏滚动条），整行不横向滚动；名称区横向拖动超过阈值不触发进入目录/展开任务，轻点仍可打开，按钮点击命中正常；覆盖目录、本机下载（父任务行与展开子项）、离线任务、回收站四类列表；桌面端保留省略号（悬停 title 看全名）；根因是窄屏网格隐藏 checkbox 后自动放置错位，菜单列落入 1fr 名称轨道被长名称挤出。

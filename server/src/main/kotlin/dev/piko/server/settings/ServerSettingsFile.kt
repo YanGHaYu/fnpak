@@ -16,6 +16,10 @@ data class ServerSettings(
     val segmentCount: Int = 8,
     /** 所有下载任务共用的连接上限（4–64），防止「多任务 × 多分段」把 PikPak 侧打爆。 */
     val maxConnections: Int = 32,
+    /** 同一文件再取一条不同签名的直链并行分段（≥16 MiB 的文件才启用；默认关闭）。 */
+    val dualSignedUrls: Boolean = false,
+    /** 下载诊断指标日志（只读，默认关闭）。 */
+    val downloadDiagnostics: Boolean = false,
 )
 
 /**

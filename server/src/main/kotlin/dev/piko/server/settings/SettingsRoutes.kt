@@ -59,6 +59,8 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 downloadDir = config.activeDownloadDir.toString(),
                 segmentCount = graph.downloadTuning.segmentCount,
                 maxConnections = graph.connectionBudget.max,
+                dualSignedUrls = graph.downloadTuning.dualSignedUrls,
+                downloadDiagnostics = graph.downloadTuning.downloadDiagnostics,
             ),
         )
     }
@@ -78,7 +80,16 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 "maxConnections 必须在 4–64 之间：${body.maxConnections}")
             return@post
         }
-        runCatching { graph.updateSettings { it.copy(segmentCount = body.segments, maxConnections = body.maxConnections) } }
+        runCatching {
+            graph.updateSettings { current ->
+                current.copy(
+                    segmentCount = body.segments,
+                    maxConnections = body.maxConnections,
+                    dualSignedUrls = body.dualSignedUrls ?: current.dualSignedUrls,
+                    downloadDiagnostics = body.downloadDiagnostics ?: current.downloadDiagnostics,
+                )
+            }
+        }
             .onFailure { error ->
                 call.respondError(
                     HttpStatusCode.InternalServerError,
@@ -89,9 +100,21 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
             }
         graph.downloadTuning.updateSegments(body.segments)
         graph.connectionBudget.updateLimit(body.maxConnections)
+        graph.downloadTuning.updateAcceleration(
+            dual = body.dualSignedUrls ?: graph.downloadTuning.dualSignedUrls,
+            diagnostics = body.downloadDiagnostics ?: graph.downloadTuning.downloadDiagnostics,
+        )
         PikoLog.w(TAG, "下载并发已更新：来源=${call.remoteIp()}，每任务 ${body.segments} 段，" +
-            "全局连接上限 ${body.maxConnections}（进行中的任务仍按启动时的段数）")
-        call.respond(DownloadTuningResponse(segments = body.segments, maxConnections = body.maxConnections))
+            "全局连接上限 ${body.maxConnections}，双直链=${graph.downloadTuning.dualSignedUrls}，" +
+            "诊断=${graph.downloadTuning.downloadDiagnostics}（进行中的任务仍按启动时的参数）")
+        call.respond(
+            DownloadTuningResponse(
+                segments = body.segments,
+                maxConnections = body.maxConnections,
+                dualSignedUrls = graph.downloadTuning.dualSignedUrls,
+                downloadDiagnostics = graph.downloadTuning.downloadDiagnostics,
+            ),
+        )
     }
 
     get("/api/settings/shares") {
