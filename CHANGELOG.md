@@ -2,6 +2,16 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.9.0 — 目录排序 / 在线预览 / 在线解压 / 种子
+
+- 目录 Tab 排序：时间 / 文件名 / 文件类型 × 正序 / 倒序，默认「时间倒序 + 文件夹恒定在前」；名称用 `Intl.Collator(zh-Hans-CN, numeric)` 自然排序，时间缺失恒排最后；偏好写入 localStorage；排序作用于已取回的数据源，不产生额外请求；`FileItem` 新增 `createdAtMs`（`createdTime` 解析为 UTC 毫秒，失败为 `null`）
+- 在线预览：`PreviewDialog` 按 `mimeType` + 扩展名分发图片 / 音频 / 视频（复用现有播放器）/ PDF（iframe）/ 纯文本与代码 / Markdown；文本与 Markdown 强制 `?mode=proxy` + `Range: bytes=0-1048575` 同源读取，UTF-8 解码失败回退 GBK，二进制嗅探命中即拒绝预览并提示下载，超 1MB 截断并明确提示「仅显示前 1MB」；Markdown 使用 `marked` + `DOMPurify` 净化，禁止内联 HTML 注入；浏览器不支持的类型回退到下载
+- 在线解压：新增 `POST /api/archive/list`、`POST /api/archive/extract`、`GET /api/archive/tasks/{id}`，`ArchiveRepository` 接入 `ServiceGraph`；服务端串行提交避免「系统繁忙」，前端 500ms 轮询、60s 超时；首次 `list` 返回 `unzip_password_required` 或 `unzip_password_incorrect`，前端弹框内联提示可重输，密码只放 POST body、不写日志、不进 URL query，成功后的密码复用到 `extract`；仅 `zip`/`rar`/`7z` 单卷显示入口，分卷（`.part*.rar`、`.7z.00N`、`.z0N`、`.r0N`）与 `tar` 隐藏；错误文案 `E_INVALID_PASSWORD` / `E_INVALID_FORMAT` / `NEED_MORE_QUOTA` / `space_not_enough`，原始异常只进日志；完成后返回产物 `fileId` 并刷新当前目录
+- 种子打开 / 离线：新增 `POST /api/links/torrent`，服务端用 `MediaService.meta(fileId).directUrl` 拉取字节，不落盘、不入库；自研 bencode 解析（不引第三方库），支持 `name` / `name.utf-8`、单文件 `length`、`files[]`、路径拼装与目录折叠、`announce` / `announce-list`，infohash 沿用 info 原始字节 SHA-1；防护 10MB / 嵌套深度 32 / 文件数 1 万 / 总大小溢出，BT v2（`file tree`）明确提示暂不支持；无官方 torrent 上传接口，magnet 的 `tr=` 由 `announce` / `announce-list` 拼接并 URL 编码；前端「打开」展示文件清单与总大小并可「加入离线」（复用 `/api/links/save`），另有「离线下载」直接提交，两条路径均可用
+- 修复 `ProgressiveList` 两处问题：补 `AppButton` 导入；哨兵出现后再懒建 `IntersectionObserver`，使「加载更多」恢复可用
+- 已知边界：目录排序只覆盖已取回的一页（≤100 项），第 101 项之后不参与排序；解压仅支持 zip/rar/7z 单卷且整包解压；种子暂不支持 BT v2
+- 版本 `0.9.0`（manifest / `ServerConfig` / `/api/health` / `package.json` 与构建产出一致）
+
 ## 0.8.2 — 排队中永久卡死修复（调度自愈）
 
 - 现象（线上实机）：3 个任务 2 个完成、1 个永久停在「排队中」（PENDING），暂停再继续、单条重试都不生效；重启应用后立即恢复——说明卡住状态只存在于进程内
