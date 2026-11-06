@@ -309,6 +309,10 @@ class MediaService(private val repository: PikoDriveRepository) : AutoCloseable 
             "mov" -> "video/quicktime"
             "mp3" -> "audio/mpeg"
             "m4a" -> "audio/mp4"
+            "pdf" -> "application/pdf"
+            "txt", "log", "md", "markdown" -> "text/plain; charset=utf-8"
+            // 用户内容不按 HTML 类型直出，避免在服务端同源下被当成页面执行
+            "html", "htm" -> "text/plain; charset=utf-8"
             else -> "application/octet-stream"
         }
     }

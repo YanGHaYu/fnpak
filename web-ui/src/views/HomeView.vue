@@ -496,6 +496,8 @@
 
     <PlayerDialog ref="playerRef" v-model="playerOpen" :item="playingItem" />
 
+    <PreviewDialog v-model="previewOpen" :item="previewItem" @download="downloadPreviewItem" />
+
     <!-- 移动端批量操作抽屉（桌面用行内浮层） -->
     <AppSheet v-model:open="batchSheet" title="批量操作">
       <div class="space-y-2">
@@ -512,6 +514,7 @@ import { useRoute, useRouter } from 'vue-router'
 import DirTreePicker from '../components/DirTreePicker.vue'
 import DriveSortControl from '../components/DriveSortControl.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
+import PreviewDialog from '../components/PreviewDialog.vue'
 import RowActionMenu from '../components/RowActionMenu.vue'
 import ScrollName from '../components/ui/ScrollName.vue'
 import TrashView from './TrashView.vue'
@@ -532,6 +535,7 @@ import { confirmDialog } from '../components/ui/confirm'
 import { tabCounts } from '../counts'
 import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
 import { readDriveSort, saveDriveSort, sortDriveItems } from '../driveSort'
+import { previewKindFor } from '../preview'
 import { refreshAuth, state } from '../store'
 
 const route = useRoute()
@@ -633,6 +637,8 @@ const saveBusy = ref(false)
 const playerOpen = ref(false)
 const playingItem = ref(null)
 const playerRef = ref(null)
+const previewOpen = ref(false)
+const previewItem = ref(null)
 
 const activeGroupCount = computed(() =>
   groups.value.filter((group) => ['SCANNING', 'QUEUED', 'DOWNLOADING'].includes(group.status)).length,
@@ -1177,7 +1183,10 @@ async function deleteOffline(rows) {
  */
 function driveActions(row) {
   const actions = []
+  const previewKind = previewKindFor(row)
+  // 视频沿用「播放」入口；图片/音频/PDF/文本/Markdown 给「预览」
   if (row.isVideo) actions.push({ key: 'play', label: '播放', icon: 'play', hint: `播放「${row.name || row.id}」` })
+  else if (previewKind) actions.push({ key: 'preview', label: '预览', icon: 'eye', hint: `在线预览「${row.name || row.id}」` })
   if (row.isFolder) {
     actions.push({ key: 'download-folder', label: '下载文件夹', icon: 'folder', hint: '递归下载整个文件夹' })
   } else {
@@ -1192,6 +1201,7 @@ function driveActions(row) {
 
 async function onDriveAction(row, key) {
   if (key === 'play') return openPlayer(row)
+  if (key === 'preview') return openPreview(row)
   if (key === 'download-folder') return downloadFolder(row)
   if (key === 'download') return startDownload(row.id)
   if (key === 'rename') return openRename(row)
@@ -1504,6 +1514,20 @@ function openPlayer(item) {
   playingItem.value = item
   playerOpen.value = true
   nextTick(() => playerRef.value?.start())
+}
+
+/** 非视频的可预览文件走统一预览弹层；视频继续用播放弹层（Range 探测逻辑复用）。 */
+function openPreview(item) {
+  const kind = previewKindFor(item)
+  if (!kind) return
+  if (kind === 'video') return openPlayer(item)
+  previewItem.value = item
+  previewOpen.value = true
+}
+
+async function downloadPreviewItem(item) {
+  previewOpen.value = false
+  await startDownload(item.id)
 }
 
 function scheduleTasksRefresh() {
