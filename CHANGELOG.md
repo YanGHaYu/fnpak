@@ -2,6 +2,49 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.10.0 — 目录页：时间 / 列表-卡片切换 / 缩略图 / 文件详情
+
+目录页界面优化。**下载与续传逻辑、`ConnectionBudget` 语义未改**；「本机下载 / 离线任务 / 回收站」三页的排序与数据逻辑未动。
+
+**时间展示**
+
+- 列表主行默认显示「添加时间」（`createdAtMs`，与「时间」排序键同源）：桌面 `添加 YYYY-MM-DD HH:mm`，移动端压缩为 `添加 MM-DD HH:mm`（跨年补年份），时间不参与名称横滑
+- 修改时间（`modifiedTime`）仅在与添加时间相差 **> 60s** 时补一行小字 `改 …`，避免绝大多数文件两行重复；悬停 `title` 展示含秒的完整时间
+- SDK 侧核实：`FileStat` 有 `createdTime` / `modifiedTime`；`FileDetail` 没有时间字段，因此详情弹层复用列表行数据而非再打详情接口
+
+**列表 / 卡片视图切换**
+
+- 目录工具栏新增「列表 / 卡片」两个按钮（桌面 32px、移动 44px），选择写入 `localStorage: fnpak-drive-view`
+- 默认值：**桌面（≥768px）列表、窄屏卡片**——宽屏列表的信息密度与列对齐更好，窄屏单行放不下名称 + 大小 + 类型 + 时间
+- 卡片：2 / 3 / 4 / 5 / 6 列（窄屏 / sm / lg / xl / 2xl），16:9 缩略图、名称两行截断（`line-clamp-2 break-all`）、大小/类型/时间元信息；文件夹带「目录」徽标
+- 与既有交互共存：整卡点击层（文件夹进入 / 视频播放 / 预览 / 解压 / 种子 / 确认下载）、排序六种组合、多选与长按、行尾 `⋯` 菜单均保留；窄屏未进入选择模式时勾选衬底 `invisible` 占位，保证 `⋯` 固定在右上角
+- `ProgressiveList` 的「加载更多」哨兵加 `col-span-full`，卡片网格下跨列显示
+
+**缩略图 / 视频封面（服务端代理 + 磁盘缓存）**
+
+- **调研结论**：PikPak 列表接口本身返回 `thumbnail_link`，SDK `listFilesPaged` 固定传 `thumbnail_size=SIZE_SMALL`；因此**不需要本地抽帧、不引入 ffmpeg 等依赖**，也不新增第三方缩略图端点
+- 浏览器只访问同源 `GET /api/drive/files/{id}/thumbnail`，签名直链不出服务端
+- 磁盘缓存：`$fnpak.home/thumbnails/${sha256(fileId)}.thumb`；上限 **128 MiB 且 4096 项**，命中刷新 mtime 实现 LRU，超出按 mtime 升序淘汰；启动时扫描校正计数；单图上限 3 MiB，只接受 jpeg/png/gif/bmp/webp/avif，非图片直接失败
+- 浏览器侧：`ETag` + `Cache-Control: private, max-age=31536000, immutable`（缩略图按 fileId 不可变），命中 `If-None-Match` 回 304；失败回 404 + `no-store`，前端渲染类型图标占位而不是坏图
+- 懒加载：`IntersectionObserver`（`rootMargin: 240px`）+ `loading="lazy"`，进入视口才请求
+- 并发：缩略图独立 `Semaphore(4)`，**不占用下载的 `ConnectionBudget`**，下载与缩略图互不饿死
+- 直链过期（403 / 非 2xx）：按 `parentId` 重列父目录换新链后重试一次
+- **重启兜底**：内存直链表为空时，按 fileId 查一次详情拿 `parentId`，再重列父目录取回 `thumbnail_link`；兜底（详情 + 重列）合计限 **2 并发**，父目录列表 **30s 复用**（整屏缩略图只多打一次列表），失败进 **60s 负缓存**；两者都拿不到才 404 走占位
+- 可观测：`GET /api/drive/thumbnail/stats` 返回 hits / misses / upstreamOk / upstreamFailures / evictions / writeFailures / cachedEntries / cachedBytes / linkEntries / coldLookups / recovered / negativeEntries
+
+**文件详情**
+
+- 目录行 `⋯` 菜单新增「详情」：弹层展示名称、类型 / MIME、大小（文件夹标「需扫描」）、添加时间、修改时间、时长、GCID / 哈希、fileId、父目录 ID、所在目录
+- 数据复用列表行，不额外请求；文件夹大小与文件数量需递归扫描，本版不做
+- 修复：`DriveDetailsDialog` 用 `v-model` 只会传 `modelValue`，而组件声明的是 `open` prop，导致点击「详情」弹层不显示；改为 `v-model:open`
+
+**构建与验证**
+
+- 前端重建并同步 `server/src/main/resources/web/`，dist 与 server 资源按文件哈希一致
+- 缩略图冒烟（本地 `HttpServer` 假 CDN）覆盖五条路径：冷启动兜底、磁盘命中、403 重列刷新、容量淘汰、重启后无直链兜底，全部通过
+- 版本 `0.10.0`（manifest / `ServerConfig` / `/api/health` / `package.json` 与构建产出一致）
+- **未验证**：真实账号下视频是否稳定返回 `thumbnail_link`；缩略图在真实 PikPak CDN 的过期策略与响应头
+
 ## 0.9.2 — 双直链加速（默认关闭）
 
 新增「双直链加速」：同一文件在下载开始后再取一条签名直链，两条直链各自并行跑分段，**默认关闭**，需在设置页「下载并发」区块手动开启。

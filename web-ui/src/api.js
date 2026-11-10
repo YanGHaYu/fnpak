@@ -71,3 +71,27 @@ export function formatSize(bytes) {
 }
 
 export const formatSpeed = (bytes) => (bytes > 0 ? `${formatSize(bytes)}/s` : '—')
+
+const pad2 = (value) => String(value).padStart(2, '0')
+
+/**
+ * 云端时间戳统一用本地时区展示。`ms` 来自服务端解析的 createdTime / modifiedTime，
+ * 缺失（null/0/NaN）时返回空串，调用方自行决定占位符。
+ */
+export function formatDateTime(ms, withSeconds = false) {
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const date = new Date(ms)
+  const base =
+    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ` +
+    `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  return withSeconds ? `${base}:${pad2(date.getSeconds())}` : base
+}
+
+/** 窄屏用的紧凑格式：MM-DD HH:mm（跨年时补上年份）。 */
+export function formatDateShort(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const date = new Date(ms)
+  const sameYear = date.getFullYear() === new Date().getFullYear()
+  const day = `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  return sameYear ? day : `${date.getFullYear()}-${day}`
+}

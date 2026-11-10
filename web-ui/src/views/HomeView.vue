@@ -66,6 +66,21 @@
           <AppButton size="sm" variant="ghost" :disabled="crumbs.length === 1" @click="up">上一级</AppButton>
           <AppButton size="sm" variant="ghost" icon="refresh" :loading="listBusy" @click="loadList">刷新</AppButton>
           <DriveSortControl v-model:dimension="driveSort.dimension" v-model:direction="driveSort.direction" />
+          <div class="inline-flex items-center rounded-md border border-line bg-surface p-0.5" role="group" aria-label="视图切换">
+            <button
+              v-for="option in DRIVE_VIEW_OPTIONS"
+              :key="option.key"
+              type="button"
+              class="flex min-h-11 min-w-11 items-center justify-center rounded transition-colors md:min-h-8 md:min-w-8"
+              :class="driveView === option.key ? 'bg-brand-soft text-brand' : 'text-muted hover:bg-surface2'"
+              :aria-pressed="String(driveView === option.key)"
+              :title="option.label"
+              :aria-label="option.label"
+              @click="setDriveView(option.key)"
+            >
+              <AppIcon :name="option.icon" :size="16" />
+            </button>
+          </div>
           <AppButton v-if="!driveSelectionMode && items.length" class="md:hidden" size="sm" variant="ghost" @click="driveSelectionMode = true">
             选择
           </AppButton>
@@ -87,10 +102,10 @@
         </nav>
 
         <div :class="driveSelection.length ? 'pb-28 md:pb-0' : ''">
-          <ProgressiveList :items="sortedItems" :step="40">
+          <ProgressiveList v-if="driveView === 'list'" :items="sortedItems" :step="40">
             <template #default="{ row }">
               <div
-                class="drive-row relative mb-2 grid cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-surface px-1.5 py-1.5 transition-colors hover:bg-surface2 focus-within:ring-2 focus-within:ring-ink/20 md:grid-cols-[auto_auto_minmax(0,1fr)_110px_150px_auto]"
+                class="drive-row relative mb-2 grid cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-line bg-surface px-1.5 py-1.5 transition-colors hover:bg-surface2 focus-within:ring-2 focus-within:ring-ink/20 md:grid-cols-[auto_auto_minmax(0,1fr)_96px_136px_142px_auto]"
                 @touchstart.passive="startDrivePress(row)"
                 @touchend="cancelDrivePress"
                 @touchmove="cancelDrivePress"
@@ -114,9 +129,15 @@
                   />
                 </div>
 
-                <span class="flex h-9 w-9 items-center justify-center rounded-md bg-surface2 text-muted max-md:col-start-2">
-                  <AppIcon :name="row.isFolder ? 'folder' : (row.isVideo ? 'play' : 'file')" :size="18" />
-                </span>
+                <DriveThumb
+                  :file-id="row.id"
+                  :name="row.name"
+                  :is-folder="row.isFolder"
+                  :is-video="row.isVideo"
+                  :has-thumbnail="!!row.hasThumbnail"
+                  :icon-size="18"
+                  class="h-9 w-9 rounded-md max-md:col-start-2"
+                />
 
                 <div class="pointer-events-none relative z-10 min-w-0 max-md:col-start-3">
                   <ScrollName :label="row.name || row.id">
@@ -135,6 +156,7 @@
                   <p class="mt-0.5 flex flex-wrap gap-x-3 text-xs text-muted md:hidden">
                     <span v-if="!row.isFolder">{{ formatSize(row.sizeBytes) || '—' }}</span>
                     <span>{{ row.isFolder ? '文件夹' : (row.mimeType || '—') }}</span>
+                    <span class="whitespace-nowrap font-mono">{{ rowTimeShort(row) }}</span>
                   </p>
                 </div>
 
@@ -144,6 +166,11 @@
                 <span class="hidden truncate text-xs text-muted md:block" :title="row.mimeType">
                   {{ row.isFolder ? '' : row.mimeType || '' }}
                 </span>
+                <!-- 时间列：主行固定「添加时间」，与「时间」排序键一致；改名/移动过的项目再补一行「改」 -->
+                <span class="hidden flex-col items-end gap-0.5 text-right md:flex">
+                  <span class="font-mono text-[11px] text-muted" :title="rowTimeTitle(row)">{{ rowAddedText(row) }}</span>
+                  <span v-if="rowModifiedText(row)" class="font-mono text-[10px] text-muted">{{ rowModifiedText(row) }}</span>
+                </span>
 
                 <div data-row-interactive class="relative z-10 max-md:col-start-4">
                   <RowActionMenu
@@ -152,6 +179,92 @@
                     :actions="driveActions(row)"
                     @select="(key) => onDriveAction(row, key)"
                   />
+                </div>
+              </div>
+            </template>
+          </ProgressiveList>
+          <!-- 卡片视图：与列表共用 sortedItems / 选中集合 / 长按 / 整卡点击 / 行内菜单，只是渲染形式不同 -->
+          <ProgressiveList
+            v-else
+            :items="sortedItems"
+            :step="40"
+            class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
+          >
+            <template #default="{ row }">
+              <div
+                class="drive-card relative flex cursor-pointer flex-col overflow-hidden rounded-md border border-line bg-surface transition-colors hover:bg-surface2 focus-within:ring-2 focus-within:ring-ink/20"
+                @touchstart.passive="startDrivePress(row)"
+                @touchend="cancelDrivePress"
+                @touchmove="cancelDrivePress"
+              >
+                <button
+                  type="button"
+                  tabindex="-1"
+                  aria-hidden="true"
+                  data-row-hit
+                  class="absolute inset-0 z-0 focus:outline-none"
+                  @click="activateDriveRow(row)"
+                />
+
+                <div class="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-1 p-1">
+                  <!-- 窄屏未进入选择模式时让这块衬底隐形（仍占位，保证 ⋯ 菜单留在右上角） -->
+                  <div
+                    data-row-interactive
+                    class="pointer-events-auto rounded bg-surface/85 p-0.5"
+                    :class="driveSelectionMode || isDriveSelected(row) ? '' : 'max-md:pointer-events-none max-md:invisible'"
+                  >
+                    <AppCheckbox
+                      :model-value="isDriveSelected(row)"
+                      :label="`选择 ${row.name || row.id}`"
+                      @update:model-value="(value) => toggleDriveRow(row, value)"
+                    />
+                  </div>
+                  <div data-row-interactive class="pointer-events-auto rounded bg-surface/85 p-0.5">
+                    <RowActionMenu
+                      trigger="hover"
+                      :label="row.name || row.id"
+                      :actions="driveActions(row)"
+                      @select="(key) => onDriveAction(row, key)"
+                    />
+                  </div>
+                </div>
+
+                <div class="pointer-events-none relative z-10">
+                  <DriveThumb
+                    :file-id="row.id"
+                    :name="row.name"
+                    :is-folder="row.isFolder"
+                    :is-video="row.isVideo"
+                    :has-thumbnail="!!row.hasThumbnail"
+                    :icon-size="30"
+                    class="aspect-video w-full"
+                  />
+                  <span
+                    v-if="row.isFolder"
+                    class="absolute bottom-1.5 left-1.5 rounded-full bg-surface/85 px-1.5 py-0.5 text-[10px] text-muted"
+                  >
+                    目录
+                  </span>
+                </div>
+
+                <div class="pointer-events-none relative z-10 min-w-0 px-2 pb-2 pt-1.5">
+                  <button
+                    type="button"
+                    data-row-name
+                    class="pointer-events-auto block w-full text-left"
+                    :title="row.name || row.id"
+                    :aria-label="rowActionLabel(row)"
+                    @click="activateDriveRow(row)"
+                  >
+                    <span class="line-clamp-2 break-all text-sm font-medium" :class="{ 'font-mono': !row.isFolder }">
+                      {{ row.name || row.id }}
+                    </span>
+                  </button>
+                  <p class="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] text-muted">
+                    <span v-if="!row.isFolder">{{ formatSize(row.sizeBytes) || '—' }}</span>
+                    <span class="min-w-0 truncate">{{ row.isFolder ? '文件夹' : (row.mimeType || '—') }}</span>
+                    <span class="font-mono">{{ rowTimeShort(row) }}</span>
+                  </p>
                 </div>
               </div>
             </template>
@@ -510,6 +623,8 @@
       </template>
     </AppDialog>
 
+    <DriveDetailsDialog v-model:open="detailOpen" :row="detailRow" :path-label="detailPath" />
+
     <PlayerDialog ref="playerRef" v-model="playerOpen" :item="playingItem" />
 
     <PreviewDialog v-model="previewOpen" :item="previewItem" @download="downloadPreviewItem" />
@@ -537,7 +652,9 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DirTreePicker from '../components/DirTreePicker.vue'
+import DriveDetailsDialog from '../components/DriveDetailsDialog.vue'
 import DriveSortControl from '../components/DriveSortControl.vue'
+import DriveThumb from '../components/DriveThumb.vue'
 import PlayerDialog from '../components/PlayerDialog.vue'
 import ArchiveDialog from '../components/ArchiveDialog.vue'
 import PreviewDialog from '../components/PreviewDialog.vue'
@@ -560,7 +677,8 @@ import SelectionDock from '../components/ui/SelectionDock.vue'
 import AppSheet from '../components/ui/AppSheet.vue'
 import { confirmDialog } from '../components/ui/confirm'
 import { tabCounts } from '../counts'
-import { api, errorDetail, errorText, formatSize, formatSpeed } from '../api'
+import { api, errorDetail, errorText, formatDateTime, formatDateShort, formatSize, formatSpeed } from '../api'
+import { DRIVE_VIEW_OPTIONS, readDriveView, saveDriveView } from '../driveView'
 import { readDriveSort, saveDriveSort, sortDriveItems } from '../driveSort'
 import { previewKindFor } from '../preview'
 import { archiveEntryState } from '../archive'
@@ -599,6 +717,41 @@ watch(
   () => [driveSort.dimension, driveSort.direction],
   () => saveDriveSort({ ...driveSort }),
 )
+// 视图模式同样只作用于目录 Tab：桌面默认列表、窄屏默认卡片，手动切换后记住
+const driveView = ref(readDriveView())
+function setDriveView(view) {
+  driveView.value = view
+  saveDriveView(view)
+}
+// 详情弹层：数据直接取当前行，打开不再请求接口
+const detailOpen = ref(false)
+const detailRow = ref(null)
+const detailPath = computed(() => crumbs.value.map((crumb) => crumb.name).join(' / '))
+function openDriveDetails(row) {
+  detailRow.value = row
+  detailOpen.value = true
+}
+
+/* 时间列：主行固定「添加时间」，与「时间」排序键保持一致；改名/移动过的项目再补「改」行。 */
+const rowAddedText = (row) => {
+  const text = formatDateTime(row.createdAtMs)
+  return text ? `添加 ${text}` : '—'
+}
+const rowModifiedText = (row) => {
+  if (!row.modifiedAtMs) return ''
+  if (row.createdAtMs && Math.abs(row.modifiedAtMs - row.createdAtMs) <= 60_000) return ''
+  const text = formatDateTime(row.modifiedAtMs)
+  return text ? `改 ${text}` : ''
+}
+const rowTimeShort = (row) => {
+  const text = formatDateShort(row.createdAtMs)
+  return text ? `添加 ${text}` : '—'
+}
+const rowTimeTitle = (row) => {
+  const added = formatDateTime(row.createdAtMs, true)
+  const modified = formatDateTime(row.modifiedAtMs, true)
+  return `添加：${added || '—'}\n修改：${modified || '—'}`
+}
 const listStatus = ref('')
 const listHint = ref('只展示第一页；文件与文件夹都能勾选，混合下载会合并成一个批次（文件夹先递归扫描）。')
 const listBusy = ref(false)
@@ -1321,6 +1474,7 @@ function driveActions(row) {
     actions.push({ key: 'download', label: '下载', icon: 'download', hint: `下载「${row.name || row.id}」到本机` })
   }
   actions.push({ key: 'rename', label: '重命名', icon: 'rename', hint: '只重命名这一项' })
+  actions.push({ key: 'details', label: '详情', icon: 'info', hint: `查看「${row.name || row.id}」的名称、大小、时间、哈希与 ID` })
   actions.push({ key: 'move', label: '移动', icon: 'move', hint: '把这一项移到其他目录' })
   actions.push({ key: 'copy', label: '复制', icon: 'copy', hint: '把这一项复制到其他目录，源文件保留' })
   actions.push({ key: 'delete', label: '删除', icon: 'delete', danger: true, hint: '移入回收站，可恢复' })
@@ -1336,6 +1490,7 @@ async function onDriveAction(row, key) {
   if (key === 'download-folder') return downloadFolder(row)
   if (key === 'download') return startDownload(row.id)
   if (key === 'rename') return openRename(row)
+  if (key === 'details') return openDriveDetails(row)
   if (key === 'move' || key === 'copy') return openTargetDialog(key, [row])
   if (key === 'delete') return deleteCloud([row])
 }

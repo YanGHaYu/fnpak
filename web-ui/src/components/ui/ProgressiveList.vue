@@ -2,7 +2,7 @@
 <template>
   <div>
     <slot v-for="row in shown" :key="row.id" :row="row" />
-    <div v-if="hasMore" ref="sentinel" class="flex justify-center py-3">
+    <div v-if="hasMore" ref="sentinel" class="col-span-full flex justify-center py-3">
       <AppButton size="sm" variant="ghost" @click="more">
         加载更多（还有 {{ items.length - shown.length }} 项）
       </AppButton>

@@ -69,6 +69,17 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     /** M3：媒体元数据、直链探测与 Range 字节流转发。 */
     val mediaService = dev.piko.server.media.MediaService(driveRepository)
 
+    /**
+     * 目录缩略图代理 + 磁盘缓存（`$home/thumbnails`）。直链来自列表响应的 thumbnail_link，
+     * 只在服务端使用；浏览器只访问同源 `/api/drive/files/{id}/thumbnail`。
+     * 重启后内存直链表为空，用详情接口拿 parentId 再重列父目录兜底。
+     */
+    val thumbnailService = dev.piko.server.drive.ThumbnailService(
+        listFolder = { parentId -> driveRepository.listFiles(parentId = parentId).getOrNull()?.first },
+        fileDetail = { fileId -> driveRepository.getFileDetail(fileId).getOrNull() },
+        directory = config.home.resolve("thumbnails"),
+    )
+
     val instantRepository: InstantMagnetRepository = InstantMagnetRepository(clientManager)
 
     /** 官方在线解压：列目录、提交任务、查询进度，密码只走请求体。 */
@@ -186,6 +197,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         runCatching { clientManager.currentClient.value?.close() }
         runCatching { captchaClient.close() }
         runCatching { mediaService.close() }
+        runCatching { thumbnailService.close() }
         runCatching { directDownloader.close() }
         scope.cancel()
     }

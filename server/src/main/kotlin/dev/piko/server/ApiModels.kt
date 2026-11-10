@@ -166,6 +166,10 @@ data class FileItem(
     val mimeType: String? = null,
     // 列表页排序用：PikPak createdTime 解析出的 UTC epoch 毫秒，无法解析时为 null
     val createdAtMs: Long? = null,
+    // PikPak modifiedTime（最近一次改名/移动等元数据变更）解析出的 UTC epoch 毫秒，缺失为 null
+    val modifiedAtMs: Long? = null,
+    // 列表响应里带回了 thumbnail_link；前端只拿这个布尔值，真图走 /api/drive/files/{id}/thumbnail 代理
+    val hasThumbnail: Boolean = false,
 )
 
 @Serializable

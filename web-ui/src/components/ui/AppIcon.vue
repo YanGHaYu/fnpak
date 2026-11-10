@@ -61,6 +61,9 @@ const ICONS = {
   key: ['M14 7a4 4 0 1 1-3 6l-7 7v-3h3v-3h3l1-1'],
   gauge: ['M4 18a8 8 0 1 1 16 0', 'M12 14l3-4'],
   logs: ['M5 3h14v18H5z', 'M8 8h8', 'M8 12h8', 'M8 16h5'],
+  grid: ['M4 4h7v7H4z', 'M13 4h7v7h-7z', 'M4 13h7v7H4z', 'M13 13h7v7h-7z'],
+  list: ['M8 6h12', 'M8 12h12', 'M8 18h12', 'M4 6h.01', 'M4 12h.01', 'M4 18h.01'],
+  info: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 11v5', 'M12 7.5h.01'],
 }
 
 const shape = computed(() => ICONS[props.name] || ICONS.more)

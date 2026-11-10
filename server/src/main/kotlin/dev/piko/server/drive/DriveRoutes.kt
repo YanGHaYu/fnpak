@@ -48,6 +48,9 @@ fun Route.driveRoutes(graph: ServiceGraph) {
             val sortOrder = sortOrderOf(call.request.queryParameters["sort"])
             graph.driveRepository.listFiles(parentId, pageToken, sortOrder).fold(
                 onSuccess = { (items, nextPageToken) ->
+                    // 列表响应自带 thumbnail_link（SDK 固定请求 thumbnail_size=SIZE_SMALL），
+                    // 顺手喂给缩略图服务，后续按 fileId 取图时不必再换一次详情接口。
+                    graph.thumbnailService.remember(items)
                     call.respond(FileListResponse(items.map { it.toItem() }, nextPageToken))
                 },
                 onFailure = { call.respondError(HttpStatusCode.BadGateway, "drive_list_failed", failureMessage(it)) },
@@ -61,7 +64,10 @@ fun Route.driveRoutes(graph: ServiceGraph) {
                 return@get call.respondError(HttpStatusCode.BadRequest, "missing_query", "q 不能为空")
             }
             graph.driveRepository.search(query).fold(
-                onSuccess = { files -> call.respond(FileListResponse(files.map { it.toItem() })) },
+                onSuccess = { files ->
+                    graph.thumbnailService.remember(files)
+                    call.respond(FileListResponse(files.map { it.toItem() }))
+                },
                 onFailure = { call.respondError(HttpStatusCode.BadGateway, "drive_search_failed", failureMessage(it)) },
             )
         }
@@ -76,6 +82,26 @@ fun Route.driveRoutes(graph: ServiceGraph) {
                 onSuccess = { call.respond(it.toResponse()) },
                 onFailure = { call.respondError(HttpStatusCode.BadGateway, "file_detail_failed", failureMessage(it)) },
             )
+        }
+
+        /**
+         * 缩略图代理：浏览器只认同源 `/api/drive/files/{id}/thumbnail`，签名直链不出服务端。
+         * 命中磁盘缓存时直接回图；未命中才拉一次上游并落盘。找不到/拉取失败回 404，
+         * 前端用类型图标占位，不会出现坏图。
+         */
+        get("/files/{id}/thumbnail") {
+            if (graph.requireLogin(call)) return@get
+            val id = call.parameters["id"].orEmpty()
+            if (id.isEmpty()) {
+                return@get call.respond(HttpStatusCode.BadRequest)
+            }
+            graph.thumbnailService.respond(call, id)
+        }
+
+        // 命中率/容量观测：管理员排查用，返回磁盘缓存与直链缓存的当前计数
+        get("/thumbnail/stats") {
+            if (graph.requireLogin(call)) return@get
+            call.respond(graph.thumbnailService.stats())
         }
 
         /**
@@ -392,7 +418,9 @@ private fun FileStat.toItem(): FileItem {
         durationMs = durationMs,
         hash = hash,
         mimeType = mimeType,
+        hasThumbnail = thumbnailLink.isNotBlank(),
         createdAtMs = isoEpochMillis(createdTime),
+        modifiedAtMs = modifiedTime.takeIf { it.isNotBlank() }?.let { isoEpochMillis(it) },
     )
 }
 
