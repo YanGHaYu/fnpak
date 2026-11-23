@@ -3,16 +3,12 @@ package dev.piko.server
 import dev.piko.server.auth.CaptchaChallengeStore
 import dev.piko.server.auth.LoginAttemptLimiter
 import dev.piko.server.auth.PikPakCaptchaClient
-import dev.piko.server.download.ADAPTIVE_INITIAL_CONNECTIONS
-import dev.piko.server.download.ConnectionBudget
 import dev.piko.server.download.DownloadGroupRegistry
-import dev.piko.server.download.DownloadTuning
+import dev.piko.server.download.LegacyDownloadMigration
 import dev.piko.server.download.MixedScanRegistry
-import dev.piko.server.download.SegmentDownloader
 import dev.piko.server.download.ServerDownloadStorage
 import dev.piko.server.download.ServerFolderSource
 import dev.piko.server.download.ServerPreferences
-import dev.piko.server.download.ThrottleMemory
 import dev.piko.server.settings.ServerSettings
 import dev.piko.server.settings.ServerSettingsFile
 import dev.piko.shared.auth.DesktopSessionStore
@@ -94,6 +90,7 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     /** 离线任务名字解析：详情按 fileId 缓存，并发上限 4。 */
     val taskNameResolver = dev.piko.server.tasks.TaskNameResolver(driveRepository)
 
+    /** 并发参数：单个任务 1–8 条连接；账号级 16 条总预算由 SDK 的 PikPakClient 统一管理。 */
     private val preferences = ServerPreferences(config.home) { config.activeDownloadDir }
 
     private val cacheStore = FilePikoCacheStore(config.home.resolve("cache").toString())
@@ -115,58 +112,27 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         return next
     }
 
-    /** 并发参数：分段数可运行期改；连接预算是全局的，改上限时排队者立即按新上限放行。 */
-    val downloadTuning = DownloadTuning(
-        segments = settings.segmentCount,
-        maxConnections = settings.maxConnections,
-        dualSignedUrls = settings.dualSignedUrls,
-        downloadDiagnostics = settings.downloadDiagnostics,
-    )
-
     /**
-     * 全局并发预算：起始 [ADAPTIVE_INITIAL_CONNECTIONS] 条，遇到限流信号自动减半并冷却，
-     * 稳定后再缓慢加回；设置页配置值是天花板。
-     *
-     * 惩罚记忆落在 `$home/download-throttle.json`：上一轮限流未过期时，本次启动从 2 条起步并静默，
-     * 避免「重启 → 16 条 → 再被拒 → 再冷却」把惩罚窗口无限续期。
+     * 旧版 `download-tasks.json` 里的分段进度迁移。必须在 [downloadCoordinator] 读任务表之前执行：
+     * 旧版是乱序写盘的分段文件，不能当作顺序前缀导入 SDK 的稀疏缓存，否则会把空洞当数据。
      */
-    val connectionBudget = ConnectionBudget(
-        settings.maxConnections,
-        throttles = ThrottleMemory(config.home.resolve("download-throttle.json")),
-    )
-
-    /** 取一次文件详情并挑出可用直链；同一文件再取一次会拿到另一份签名（同签名时第二 lane 自动放弃）。 */
-    private val directUrlProvider: suspend (String) -> String = { fileId ->
-        driveRepository.getFileDetail(fileId).getOrThrow().let { detail ->
-            detail.downloadUrl?.takeIf { it.isNotBlank() }
-                ?: detail.webContentLink?.takeIf { it.isNotBlank() }
-                ?: error("PikPak 没有返回可用的下载直链")
-        }
-    }
-
-    /**
-     * 分段直链下载：原画整文件任务全走它，绕开 SDK 的稀疏暂存。直链只在任务开始时取一次，
-     * 段内 401/403 时由它自己按 `fileId` 重新取。
-     */
-    private val directDownloader = SegmentDownloader(
-        urlProvider = directUrlProvider,
-        secondUrlProvider = directUrlProvider,
-        budget = connectionBudget,
-        tuning = downloadTuning,
-    )
+    private val legacyMigration = LegacyDownloadMigration.migrate(config.home)
 
     val downloadStorage = ServerDownloadStorage(
         cacheDirectory = config.home.resolve("download-cache").toFile(),
         directoryProvider = { config.activeDownloadDir.toFile() },
     )
 
+    /**
+     * 整文件下载不再注入自研分段器：直接走 SDK 的块缓存（`PikoFileCache` / `BlockCache` /
+     * `RangeReader`），与播放、缩略图共用同一个 `PikPakClient` 和账号级 16 条连接预算。
+     */
     val downloadCoordinator = PikoDownloadCoordinator(
         clientProvider = clientManager,
         preferences = preferences,
         storage = downloadStorage,
         scope = scope,
         cacheStore = cacheStore,
-        directDownloader = directDownloader,
     )
 
     /** 文件夹递归来源：服务端不按今日额度拦截，扫完直接入队。 */
@@ -181,20 +147,37 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     init {
         downloadCoordinator.bindDefaultFolderSource(serverFolderSource)
-        val cooldownSec = (connectionBudget.cooldownRemainingMs() + 999) / 1000
-        if (cooldownSec > 0) {
+        // 旧版自适应并发/惩罚记忆的落盘文件已经失去意义：删掉，避免下次排查时误读
+        val throttleFile = config.home.resolve("download-throttle.json")
+        if (runCatching { java.nio.file.Files.deleteIfExists(throttleFile) }.getOrDefault(false)) {
+            PikoLog.i("FNPak", "已清理旧版限流惩罚文件 download-throttle.json（自适应并发已移除）")
+        }
+        preferences.setConcurrentConnections(settings.concurrentConnections)
+        PikoLog.i(
+            "FNPak",
+            "下载传输：SDK 块缓存（单文件 ${settings.concurrentConnections.coerceIn(1, 8)} 条，" +
+                "与播放/缩略图共用账号 16 条预算；上限 8 条为上游行为）",
+        )
+        if (legacyMigration.total > 0) {
             PikoLog.w(
                 "FNPak",
-                "账号限流冷却中，剩余 $cooldownSec 秒：本次从 ${connectionBudget.max} 条起步，" +
-                    "冷却结束前不发起新连接（重启不会重置惩罚）",
-            )
-        } else {
-            PikoLog.i(
-                "FNPak",
-                "下载并发：起始 ${connectionBudget.max} 条，天花板 ${connectionBudget.maxCeiling} 条（自适应，" +
-                    "遇到零字节响应/503/429 自动降半并冷却，稳定后缓慢恢复）",
+                "旧下载任务迁移：保留顺序进度 ${legacyMigration.kept} 个，" +
+                    "重置旧分段任务 ${legacyMigration.reset} 个（将从头下载），" +
+                    "已完成 ${legacyMigration.completed} 个不受影响",
             )
         }
+    }
+
+    /**
+     * 设置页修改单文件并发数。只影响新任务；SDK 会把所有使用者的连接汇总到账号 16 条预算里。
+     */
+    fun applyConcurrentConnections(count: Int) {
+        val clamped = count.coerceIn(1, 8)
+        preferences.setConcurrentConnections(clamped)
+        PikoLog.i(
+            "FNPak",
+            "下载并发切换为单文件 $clamped 条（与播放/缩略图共用账号 16 条预算，进行中的任务不变）",
+        )
     }
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()
@@ -224,7 +207,6 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         runCatching { captchaClient.close() }
         runCatching { mediaService.close() }
         runCatching { thumbnailService.close() }
-        runCatching { directDownloader.close() }
         scope.cancel()
     }
 }

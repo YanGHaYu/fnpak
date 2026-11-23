@@ -57,11 +57,7 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                     filePath = access.tokenFilePath,
                 ),
                 downloadDir = config.activeDownloadDir.toString(),
-                segmentCount = graph.downloadTuning.segmentCount,
-                // 设置页展示的是用户配置的天花板；当前允许的并发由自适应控制器决定，只写日志
-                maxConnections = graph.connectionBudget.maxCeiling,
-                dualSignedUrls = graph.downloadTuning.dualSignedUrls,
-                downloadDiagnostics = graph.downloadTuning.downloadDiagnostics,
+                concurrentConnections = graph.currentSettings().concurrentConnections,
             ),
         )
     }
@@ -69,27 +65,21 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
     post("/api/settings/download-tuning") {
         val body = runCatching { call.receive<DownloadTuningRequest>() }.getOrNull()
             ?: run {
-                call.respondError(HttpStatusCode.BadRequest, "invalid_body", "请求体需要 segments 与 maxConnections")
+                call.respondError(HttpStatusCode.BadRequest, "invalid_body", "请求体需要 concurrentConnections")
                 return@post
             }
-        if (body.segments !in 1..32) {
-            call.respondError(HttpStatusCode.BadRequest, "invalid_segments", "segments 必须在 1–32 之间：${body.segments}")
-            return@post
-        }
-        if (body.maxConnections !in 4..64) {
-            call.respondError(HttpStatusCode.BadRequest, "invalid_connections",
-                "maxConnections 必须在 4–64 之间：${body.maxConnections}")
+        // maxConnections 是旧版字段，语义相同，保留兼容
+        val requested = body.maxConnections ?: body.concurrentConnections
+        if (requested !in 1..8) {
+            call.respondError(
+                HttpStatusCode.BadRequest,
+                "invalid_connections",
+                "并发连接数必须在 1–8 之间：$requested（与上游一致，账号总预算 16 条由 SDK 统一管理）",
+            )
             return@post
         }
         runCatching {
-            graph.updateSettings { current ->
-                current.copy(
-                    segmentCount = body.segments,
-                    maxConnections = body.maxConnections,
-                    dualSignedUrls = body.dualSignedUrls ?: current.dualSignedUrls,
-                    downloadDiagnostics = body.downloadDiagnostics ?: current.downloadDiagnostics,
-                )
-            }
+            graph.updateSettings { current -> current.copy(concurrentConnections = requested) }
         }
             .onFailure { error ->
                 call.respondError(
@@ -99,24 +89,13 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 )
                 return@post
             }
-        graph.downloadTuning.updateSegments(body.segments)
-        graph.connectionBudget.updateLimit(body.maxConnections)
-        graph.downloadTuning.updateAcceleration(
-            dual = body.dualSignedUrls ?: graph.downloadTuning.dualSignedUrls,
-            diagnostics = body.downloadDiagnostics ?: graph.downloadTuning.downloadDiagnostics,
+        graph.applyConcurrentConnections(requested)
+        PikoLog.w(
+            TAG,
+            "下载并发已更新：来源=${call.remoteIp()}，单文件 $requested 条（1–8），" +
+                "与播放/缩略图共用账号 16 条预算（进行中的任务仍按启动时的并发）",
         )
-        PikoLog.w(TAG, "下载并发已更新：来源=${call.remoteIp()}，每任务 ${body.segments} 段，" +
-            "并发天花板 ${body.maxConnections}，当前允许 ${graph.connectionBudget.max}（自适应会在遇到限流时自动降低），" +
-            "双直链=${graph.downloadTuning.dualSignedUrls}，" +
-            "诊断=${graph.downloadTuning.downloadDiagnostics}（进行中的任务仍按启动时的参数）")
-        call.respond(
-            DownloadTuningResponse(
-                segments = body.segments,
-                maxConnections = graph.connectionBudget.maxCeiling,
-                dualSignedUrls = graph.downloadTuning.dualSignedUrls,
-                downloadDiagnostics = graph.downloadTuning.downloadDiagnostics,
-            ),
-        )
+        call.respond(DownloadTuningResponse(concurrentConnections = requested))
     }
 
     get("/api/settings/shares") {

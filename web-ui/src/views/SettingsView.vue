@@ -106,31 +106,16 @@
 
     <section class="card p-4">
       <h2 class="mb-3 text-base font-semibold">下载并发</h2>
-      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-        <AppField label="每任务分段数（1–32）">
-          <AppInput v-model="segments" type="number" compact />
-        </AppField>
-        <AppField label="全局连接预算（4–64）">
-          <AppInput v-model="maxConnections" type="number" compact />
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_auto] lg:items-end">
+        <AppField label="单文件并发连接数（1–8）">
+          <AppInput v-model="concurrentConnections" type="number" compact />
         </AppField>
         <AppButton size="sm" variant="primary" :loading="tuningBusy" @click="saveTuning">保存</AppButton>
       </div>
       <p class="mt-2 text-xs text-muted">
-        分段数决定单个文件并发几条 Range 连接；连接预算是所有任务的总上限（活跃任务 × 每任务段数不会再直接放大成连接数）。
-        改完对**新任务**生效，已在跑的任务沿用启动时的段数。
+        与 Piko 原版一致：单个文件最多 8 条连接，默认 4 条。下载、播放、缩略图共用同一个账号级 16 条预算，
+        由 SDK 统一调度；调高只影响新任务，已经在跑的任务沿用开始时的并发。
       </p>
-      <div class="mt-3 rounded-md border border-line bg-surface2 p-3">
-        <div class="flex items-start gap-2">
-          <AppCheckbox v-model="dualSignedUrls" label="双直链加速" class="shrink-0" />
-          <div class="min-h-11 flex-1 cursor-pointer py-2" @click="dualSignedUrls = !dualSignedUrls">
-            <p class="text-sm font-medium">双直链加速（默认关闭）</p>
-            <p class="mt-1 text-xs text-muted">
-              开启后同一文件再取一条签名直链并行分段，占用双倍分段连接（如 8→16），仍受全局连接预算约束。
-              仅在两条直链签名不同时才生效；真实网络提速幅度未验证，账号级限速时可能完全无效。
-            </p>
-          </div>
-        </div>
-      </div>
       <p v-if="tuningStatus" class="mt-2 text-xs" :class="tuningError ? 'text-danger' : 'text-muted'">
         {{ tuningStatus }}
       </p>
@@ -161,7 +146,6 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AppAlert from '../components/ui/AppAlert.vue'
 import AppButton from '../components/ui/AppButton.vue'
-import AppCheckbox from '../components/ui/AppCheckbox.vue'
 import AppField from '../components/ui/AppField.vue'
 import AppInput from '../components/ui/AppInput.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
@@ -203,9 +187,7 @@ const saveBusy2 = ref(false)
 const dirStatus = ref('')
 const dirError = ref(false)
 
-const segments = ref('8')
-const maxConnections = ref('32')
-const dualSignedUrls = ref(false)
+const concurrentConnections = ref('4')
 const tuningBusy = ref(false)
 const tuningStatus = ref('')
 const tuningError = ref(false)
@@ -230,9 +212,7 @@ async function loadAll() {
     return
   }
   settings.value = result.data
-  segments.value = String(result.data.segmentCount ?? 8)
-  maxConnections.value = String(result.data.maxConnections ?? 32)
-  dualSignedUrls.value = !!result.data.dualSignedUrls
+  concurrentConnections.value = String(result.data.concurrentConnections ?? 4)
   await loadShares()
 }
 
@@ -306,9 +286,7 @@ async function saveTuning() {
   const result = await api('/api/settings/download-tuning', {
     method: 'POST',
     body: JSON.stringify({
-      segments: Number(segments.value),
-      maxConnections: Number(maxConnections.value),
-      dualSignedUrls: dualSignedUrls.value,
+      concurrentConnections: Number(concurrentConnections.value),
     }),
   })
   tuningBusy.value = false
@@ -317,8 +295,7 @@ async function saveTuning() {
     tuningError.value = true
     return
   }
-  tuningStatus.value = `已保存：每任务 ${result.data.segments} 段，全局连接上限 ${result.data.maxConnections}，` +
-    `双直链加速${result.data.dualSignedUrls ? '已开启' : '已关闭'}（新任务生效）`
+  tuningStatus.value = `已保存：单文件并发 ${result.data.concurrentConnections} 条（1–8，新任务生效）`
   await loadAll()
 }
 

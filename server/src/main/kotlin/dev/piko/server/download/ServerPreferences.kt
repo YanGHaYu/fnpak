@@ -114,9 +114,14 @@ class ServerPreferences(
     override val concurrentAccelerationFlow: Flow<Boolean> get() = concurrentAcceleration
     override suspend fun setConcurrentAccelerationEnabled(enabled: Boolean) { concurrentAcceleration.value = enabled }
 
-    /** 无头机器上一次下几个连接：默认 4，与桌面端默认一致。 */
+    /** 无头机器上一次下几个连接：默认 4，与桌面端默认一致；范围 1–8，与上游一致。 */
     private val concurrentConnections = cell(4)
     override val concurrentConnectionsFlow: Flow<Int> get() = concurrentConnections
+
+    /** 设置页修改后立即生效（只影响新任务；SDK 的账号 16 条预算由 PikPakClient 统一管）。 */
+    fun setConcurrentConnections(count: Int) {
+        concurrentConnections.value = count.coerceIn(1, 8)
+    }
 
     private val downloadDirPath = cell(downloadDir().toString())
     override val downloadDirPathFlow: Flow<String> get() = downloadDirPath

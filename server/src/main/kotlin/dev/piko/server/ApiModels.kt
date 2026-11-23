@@ -39,14 +39,11 @@ data class SettingsResponse(
     val home: String,
     val accessToken: AccessTokenSettings,
     val downloadDir: String,
-    /** 每个任务的分段数（并发连接数按任务算）。 */
-    val segmentCount: Int = 8,
-    /** 所有任务共用的连接天花板；实际并发从 16 起步并自适应降级。 */
-    val maxConnections: Int = 16,
-    /** 同一文件是否并行使用第二条签名直链。 */
-    val dualSignedUrls: Boolean = false,
-    /** 下载诊断指标日志是否开启。 */
-    val downloadDiagnostics: Boolean = false,
+    /**
+     * 单个下载任务的并发连接数（1–8）。实际传输由 SDK 的块缓存完成，
+     * 与播放、缩略图共用同一个 `PikPakClient`，账号级 16 条预算由 SDK 统一管理。
+     */
+    val concurrentConnections: Int = 4,
 )
 
 @Serializable
@@ -80,22 +77,18 @@ data class DownloadDirRequest(
 @Serializable
 data class DownloadDirResponse(val downloadDir: String)
 
-/** 分段下载参数：段数 1–32，全局连接预算 4–64；两个加速开关为 null 时保持原值。 */
+/** 下载并发参数：单文件连接数 1–8，与播放/缩略图共用 SDK 的账号 16 条预算。 */
 @Serializable
 data class DownloadTuningRequest(
-    val segments: Int = 8,
-    val maxConnections: Int = 16,
-    val dualSignedUrls: Boolean? = null,
-    val downloadDiagnostics: Boolean? = null,
+    val concurrentConnections: Int = 4,
+    /** 旧客户端兼容：旧版把同一语义放在 maxConnections 里。 */
+    val maxConnections: Int? = null,
 )
 
 /** 保存后的实际生效值；返回 200+JSON 而不是 204，前端可直接把回包当确认。 */
 @Serializable
 data class DownloadTuningResponse(
-    val segments: Int,
-    val maxConnections: Int,
-    val dualSignedUrls: Boolean = false,
-    val downloadDiagnostics: Boolean = false,
+    val concurrentConnections: Int,
 )
 
 @Serializable

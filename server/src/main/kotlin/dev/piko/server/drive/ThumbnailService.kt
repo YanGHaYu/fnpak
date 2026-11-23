@@ -99,7 +99,7 @@ class ThumbnailService(
     private val cachedEntries = AtomicLong()
     private val scanned = AtomicBoolean(false)
     private val evictLock = Any()
-    // 与下载的 ConnectionBudget 无关：缩略图单独限 4 条上游连接，避免和下载互相饿死
+    // 缩略图走自己的 4 条上游 HTTP 连接；下载走 SDK 块缓存，两边互不占用对方的名额
     private val upstreamSlots = Semaphore(UPSTREAM_PARALLELISM)
     // 冷启动兜底再收窄到 2 并发，防止一次进入大目录就把详情接口打满
     private val recoverySlots = Semaphore(RECOVERY_PARALLELISM)

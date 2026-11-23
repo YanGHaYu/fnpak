@@ -12,18 +12,15 @@ import kotlinx.serialization.json.Json
 @Serializable
 data class ServerSettings(
     val downloadDir: String? = null,
-    /** 每个下载任务切成几段并发拉（1–32）。 */
-    val segmentCount: Int = 8,
     /**
-     * 所有下载任务共用的连接天花板（4–64）。
-     * 实际并发从 16 起步，遇到 CDN 限流（closed / 503 / 零字节响应）会自动减半并冷却，
-     * 稳定后再缓慢加回，但永远不超过这个值。
+     * 单个下载任务的并发连接数（1–8），与上游/Piko 官方客户端一致。
+     *
+     * 真正执行并发的是 SDK 的 `PikPakFileCache`：它会和播放、缩略图共用同一个
+     * `PikPakClient`，因此这里只控制「单个文件开几条」，账号级 16 条总预算由 SDK 统一管。
+     * 旧版本里的 `segmentCount` / `maxConnections` / `dualSignedUrls` / `downloadDiagnostics`
+     * 会被 `ignoreUnknownKeys` 忽略，不影响旧 `settings.json` 继续解析。
      */
-    val maxConnections: Int = 16,
-    /** 同一文件再取一条不同签名的直链并行分段（≥16 MiB 的文件才启用；默认关闭）。 */
-    val dualSignedUrls: Boolean = false,
-    /** 下载诊断指标日志（只读，默认关闭）。 */
-    val downloadDiagnostics: Boolean = false,
+    val concurrentConnections: Int = 4,
 )
 
 /**

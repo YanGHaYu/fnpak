@@ -511,13 +511,10 @@ internal fun ServiceGraph.downloadListResponse(fileId: String? = null): Download
     val tasks = downloadCoordinator.tasks.value.values
         .filter { if (fileId == null) true else it.fileId == fileId }
         .sortedBy { it.createdAtMs }
-    // 冷却期是全局的：所有正在下载的分段任务都停在 0 字节，任务行要能看出「在等惩罚窗口」，
-    // 而不是 DOWNLOADING + 0 字节让用户以为卡死。
-    val throttleSec = (connectionBudget.cooldownRemainingMs() / 1000).toInt()
-    return DownloadListResponse(tasks.map { it.toItem(throttleSec) }, downloadGroups())
+    return DownloadListResponse(tasks.map { it.toItem() }, downloadGroups())
 }
 
-private fun DownloadTask.toItem(throttleSec: Int) = DownloadItem(
+private fun DownloadTask.toItem() = DownloadItem(
     id = taskId,
     fileName = displayName,
     fileId = fileId,
@@ -525,7 +522,7 @@ private fun DownloadTask.toItem(throttleSec: Int) = DownloadItem(
     bytesTotal = totalBytes,
     percent = (progress.toDouble() * 1000).roundToLong() / 10.0,
     speedBytesPerSec = speedBytesPerSec,
-    status = if (throttleSec > 0 && status == DownloadStatus.DOWNLOADING) "THROTTLED" else status.name,
+    status = status.name,
     error = errorMessage,
     path = destinationPath,
     parentTaskId = parentTaskId,
@@ -533,7 +530,6 @@ private fun DownloadTask.toItem(throttleSec: Int) = DownloadItem(
     rootFolderId = rootFolderId,
     batchName = batch?.folderName.orEmpty(),
     batchIsFolder = batch?.isFolder == true,
-    throttleRemainingSec = if (throttleSec > 0 && status == DownloadStatus.DOWNLOADING) throttleSec else 0,
 )
 
 /**
