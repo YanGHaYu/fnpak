@@ -18,6 +18,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicLongArray
@@ -421,11 +422,13 @@ class SegmentDownloader(
                         val waitStart = System.nanoTime()
                         val permit = budget.acquire()
                         metrics.recordBudgetWait((System.nanoTime() - waitStart) / 1_000_000)
+                        book.connectingStart()
                         try {
                             fetchRange(channel, holder, from, panel.end, lane, panel.index, metrics) { bytes ->
                                 book.add(panel.index, bytes)
                             }
                         } finally {
+                            book.connectingEnd()
                             budget.release(permit)
                         }
                     }
@@ -545,12 +548,14 @@ class SegmentDownloader(
                         val waitStart = System.nanoTime()
                         val permit = budget.acquire()
                         metrics.recordBudgetWait((System.nanoTime() - waitStart) / 1_000_000)
+                        book.connectingStart()
                         try {
                             book.setActive(panel.index, true)
                             fetchRange(channel, holder, from, panel.end, "single", panel.index, metrics) { bytes ->
                                 book.add(panel.index, bytes)
                             }
                         } finally {
+                            book.connectingEnd()
                             book.setActive(panel.index, false)
                             budget.release(permit)
                         }
@@ -679,7 +684,7 @@ class SegmentDownloader(
                 val milestone = PROGRESS_MILESTONES[nextMilestone++]
                 PikoLog.i(
                     TAG,
-                    "进度 $milestone%：$fileName，速度 ${speed / 1024} KiB/s，活跃分段 ${book.activeCount()}",
+                    "进度 $milestone%：$fileName，速度 ${speed / 1024} KiB/s，在途连接 ${book.connectingCount()}",
                 )
             }
             onProgress(DirectDownloadProgress(total, totalBytes, speed, book.segments(), degraded.get()))
@@ -718,6 +723,7 @@ class SegmentDownloader(
 private class ProgressBook(private val panels: List<Panel>, completed: List<DownloadedSpan>) {
     private val written = AtomicLongArray(panels.size)
     private val active = AtomicIntegerArray(panels.size)
+    private val connecting = AtomicInteger(0)
     private val total = AtomicLong(0)
 
     init {
@@ -740,7 +746,12 @@ private class ProgressBook(private val panels: List<Panel>, completed: List<Down
 
     fun total(): Long = total.get()
 
-    fun activeCount(): Int = panels.count { active[it.index] == 1 }
+    /** 当前真正在请求中的连接数（不含排队等 gate/budget 的分段协程）。 */
+    fun connectingCount(): Int = connecting.get()
+
+    fun connectingStart() = connecting.incrementAndGet()
+
+    fun connectingEnd() = connecting.decrementAndGet()
 
     fun missing(): Long = panels.sumOf { it.size - written[it.index] }
 
