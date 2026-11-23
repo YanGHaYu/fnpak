@@ -14,8 +14,12 @@ data class ServerSettings(
     val downloadDir: String? = null,
     /** 每个下载任务切成几段并发拉（1–32）。 */
     val segmentCount: Int = 8,
-    /** 所有下载任务共用的连接上限（4–64），防止「多任务 × 多分段」把 PikPak 侧打爆。 */
-    val maxConnections: Int = 32,
+    /**
+     * 所有下载任务共用的连接上限（4–64）。
+     * 默认 16 = SDK 的 `DEFAULT_ACCOUNT_CONNECTION_BUDGET`：PikPak 的 CDN 按账号/IP 限并发，
+     * 超过这个量会先断连（IOException: closed）、再回 503，批量下载就会集体失败。
+     */
+    val maxConnections: Int = 16,
     /** 同一文件再取一条不同签名的直链并行分段（≥16 MiB 的文件才启用；默认关闭）。 */
     val dualSignedUrls: Boolean = false,
     /** 下载诊断指标日志（只读，默认关闭）。 */

@@ -133,13 +133,19 @@ object PikoErrorMapper {
                 "연결이 끊겨 끝까지 쓰지 못했습니다(재시도하면 이어서 받을 수 있습니다)",
                 "連線中斷，本次未寫完（可直接重試續傳）",
             )
-            error is IOException -> tr(
-                "网络中断，可直接重试续传",
-                "Network interrupted; retry to resume",
-                "ネットワークが切断されました。再試行で続きから再開できます",
-                "네트워크가 끊겼습니다. 재시도하면 이어서 받을 수 있습니다",
-                "網路中斷，可直接重試續傳",
-            )
+            error is IOException -> {
+                // 以前这里只给「网络中断」，把 HttpTimeout / 连接重置 / 磁盘写失败等真实原因全盖住了。
+                // 保留可直接重试续传的结论，但把原始异常类与消息附在括号里（截断，避免撑爆任务行）。
+                val hint = details.takeIf { it.isNotBlank() }?.let { "（${it.take(160)}）" }
+                    ?: "（${error::class.simpleName}）"
+                tr(
+                    "网络中断，可直接重试续传$hint",
+                    "Network interrupted; retry to resume$hint",
+                    "ネットワークが切断されました。再試行で続きから再開できます$hint",
+                    "네트워크가 끊겼습니다. 재시도하면 이어서 받을 수 있습니다$hint",
+                    "網路中斷，可直接重試續傳$hint",
+                )
+            }
             details.isNotEmpty() -> details
             else -> tr("未知错误", "Unknown error", "不明なエラー", "알 수 없는 오류", "未知錯誤")
         }

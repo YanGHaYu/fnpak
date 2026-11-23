@@ -32,6 +32,12 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
+ * PikPak CDN 的账号级并发经验上限，与 SDK 的 `DEFAULT_ACCOUNT_CONNECTION_BUDGET` 一致。
+ * 多任务批量下载时，连接数超过它就会先被断连（IOException: closed）再收到 503。
+ */
+const val ACCOUNT_CONNECTION_LIMIT = 16
+
+/**
  * 服务端的依赖容器，替代 `:ui` 的 `PikoServices`。
  *
  * 只装配 `:shared` 里不依赖 Compose 的部分：
@@ -121,7 +127,14 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
         downloadDiagnostics = settings.downloadDiagnostics,
     )
 
-    val connectionBudget = ConnectionBudget(settings.maxConnections)
+    /**
+     * 实际生效的全局连接上限：设置页仍允许填 4–64，但超过账号级上限的部分不会真的开出去，
+     * 否则文件夹批量下载（默认 3 个任务并发 × 双直链 16 条）会把 PikPak 打到断连 + 503。
+     */
+    private val effectiveMaxConnections: Int
+        get() = settings.maxConnections.coerceAtMost(ACCOUNT_CONNECTION_LIMIT)
+
+    val connectionBudget = ConnectionBudget(effectiveMaxConnections)
 
     /** 取一次文件详情并挑出可用直链；同一文件再取一次会拿到另一份签名（同签名时第二 lane 自动放弃）。 */
     private val directUrlProvider: suspend (String) -> String = { fileId ->
@@ -169,6 +182,15 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     init {
         downloadCoordinator.bindDefaultFolderSource(serverFolderSource)
+        // 配置 32 在单文件时看着更快，但文件夹批量下载会多任务叠加，超过 PikPak 账号级并发上限后
+        // CDN 先断连再回 503，任务会整体失败。这里把真实生效值写进日志，方便对账。
+        if (settings.maxConnections > ACCOUNT_CONNECTION_LIMIT) {
+            PikoLog.w(
+                "FNPak",
+                "全局连接上限配置为 ${settings.maxConnections}，超过 PikPak 账号经验上限 $ACCOUNT_CONNECTION_LIMIT，" +
+                    "实际按 $ACCOUNT_CONNECTION_LIMIT 生效（可在设置页改小以消除这条提示）",
+            )
+        }
     }
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()

@@ -52,6 +52,22 @@ private const val SPEED_WINDOW_MS = 3_000L
 private const val MAX_LINK_REFRESH = 3
 private const val MIN_PANEL_BYTES = 1L * 1024 * 1024
 
+/** 每个下载任务各打一行「完成度/速度/活跃分段」，用于判断尾部掉速是并发降了还是单连接变慢。 */
+private val PROGRESS_MILESTONES = intArrayOf(10, 25, 50, 75, 90, 95, 99)
+
+/**
+ * 分段再细分倍数。保持连接数不变（gate/budget 仍是每 URL 8 条、全局按设置），只是把文件切成
+ * 更多小段排队：8 段时最后 12.5% 的文件只剩 1 条连接在跑，实测掉速明显；细分 8 倍后尾部
+ * 只剩最后 1~2 个小段，速度能保持到接近 100%。
+ */
+private const val TAIL_PANEL_FACTOR_DEFAULT = 8
+
+/** 允许离线 bench 用 `-Dpiko.download.panelFactor=1` 复现旧行为；线上不设置就是 [TAIL_PANEL_FACTOR_DEFAULT]。 */
+private val TAIL_PANEL_FACTOR: Int by lazy {
+    System.getProperty("piko.download.panelFactor")?.toIntOrNull()?.coerceIn(1, 32)
+        ?: TAIL_PANEL_FACTOR_DEFAULT
+}
+
 /** 每条签名直链最多同时开几条连接：CDN 对同一签名 URL 的第 9 条起返回 503（SDK 实测 n−8）。 */
 private const val PER_URL_CONNECTIONS = 8
 
@@ -101,7 +117,9 @@ class DownloadTuning(
 
     companion object {
         const val DEFAULT_SEGMENTS = 8
-        const val DEFAULT_MAX_CONNECTIONS = 32
+
+        /** 默认 16 = SDK 的账号级连接预算；再高会在多任务并发时触发 CDN 断连/503。 */
+        const val DEFAULT_MAX_CONNECTIONS = 16
         const val DEFAULT_MAX_RETRIES = 5
     }
 }
@@ -304,15 +322,26 @@ class SegmentDownloader(
         require(totalBytes > 0) { "分段下载需要已知文件大小：$fileName" }
         val dualEnabled = tuning.dualSignedUrls && secondUrlProvider != null &&
             totalBytes >= DUAL_LANE_MIN_BYTES
-        // 开启双直链时段数翻倍：每条 lane 各自跑满 segmentCount 条连接，而不是把原有 8 段拆成 4+4
-        val panels = planPanels(totalBytes, if (dualEnabled) tuning.segmentCount * 2 else tuning.segmentCount)
+        // 开启双直链时段数翻倍：每条 lane 各自跑满 segmentCount 条连接，而不是把原有 8 段拆成 4+4。
+        // 再按 TAIL_PANEL_FACTOR 细分：连接数仍由 gate/budget 限制在 segmentCount 附近，但接近完成时
+        // 剩下的活会摊到更多小段上，不会出现「最后 1/8 文件只靠 1 条连接」的掉速尾巴。
+        val lanePanels = tuning.segmentCount * TAIL_PANEL_FACTOR
+        val panels = planPanels(totalBytes, if (dualEnabled) lanePanels * 2 else lanePanels)
         val book = ProgressBook(panels, completedRanges)
         val degraded = AtomicBoolean(false)
         val metrics = DownloadMetrics(tuning.downloadDiagnostics)
         val startedNs = System.nanoTime()
         val raf = RandomAccessFile(targetPath, "rw")
         val channel = raf.channel
-        val holder = UrlHolder(fileId, urlProvider, urlProvider(fileId), PER_URL_CONNECTIONS)
+        // 首次取直链失败时把 fileId 和原始异常打进日志：任务行只显示「网络中断」时还能靠这里定位
+        val initialUrl = try {
+            urlProvider(fileId)
+        } catch (error: Throwable) {
+            PikoLog.w(TAG, "取直链失败：fileId=$fileId name=$fileName，" +
+                "${error::class.simpleName}: ${error.message}")
+            throw error
+        }
+        val holder = UrlHolder(fileId, urlProvider, initialUrl, PER_URL_CONNECTIONS)
         try {
             if (raf.length() != totalBytes) raf.setLength(totalBytes)
             PikoLog.i(TAG, "分段下载：$fileName，$totalBytes 字节，${panels.size} 段，已落盘 ${book.total()} 字节，" +
@@ -320,7 +349,7 @@ class SegmentDownloader(
             try {
                 coroutineScope {
                     // 进度协程是常驻循环：分段协程全部结束后必须显式取消，否则 coroutineScope 永远不返回
-                    val ticker = launch { progressLoop(book, totalBytes, degraded, onProgress, onCheckpoint, channel) }
+                    val ticker = launch { progressLoop(fileName, book, totalBytes, degraded, onProgress, onCheckpoint, channel) }
                     try {
                         val jobs = mutableListOf<Job>()
                         if (!dualEnabled) {
@@ -621,6 +650,7 @@ class SegmentDownloader(
 
     /** 500 毫秒报一次进度；速度按 3 秒滑动窗口算，避免瞬时值抖动。 */
     private suspend fun progressLoop(
+        fileName: String,
         book: ProgressBook,
         totalBytes: Long,
         degraded: AtomicBoolean,
@@ -632,6 +662,7 @@ class SegmentDownloader(
         val origin = System.nanoTime()
         window.addLast(origin to book.total())
         var lastCheckpoint = origin
+        var nextMilestone = 0
         while (currentCoroutineContext().isActive) {
             delay(PROGRESS_INTERVAL_MS)
             val now = System.nanoTime()
@@ -641,6 +672,16 @@ class SegmentDownloader(
             val (firstMark, firstBytes) = window.first()
             val elapsedNs = (now - firstMark).coerceAtLeast(1L)
             val speed = ((total - firstBytes).coerceAtLeast(0L) * 1_000_000_000L) / elapsedNs
+            // 只在这几个完成度上各打一行：排查「快完成时掉速」时，看活跃分段数就知道是并发降下来了
+            // 还是单连接速率掉了（此前日志只有平均值，无法分辨）。
+            val pct = (total * 100 / totalBytes).toInt()
+            while (nextMilestone < PROGRESS_MILESTONES.size && pct >= PROGRESS_MILESTONES[nextMilestone]) {
+                val milestone = PROGRESS_MILESTONES[nextMilestone++]
+                PikoLog.i(
+                    TAG,
+                    "进度 $milestone%：$fileName，速度 ${speed / 1024} KiB/s，活跃分段 ${book.activeCount()}",
+                )
+            }
             onProgress(DirectDownloadProgress(total, totalBytes, speed, book.segments(), degraded.get()))
             if ((now - lastCheckpoint) / 1_000_000L >= CHECKPOINT_INTERVAL_MS) {
                 lastCheckpoint = now
@@ -698,6 +739,8 @@ private class ProgressBook(private val panels: List<Panel>, completed: List<Down
     fun setActive(index: Int, value: Boolean) = active.set(index, if (value) 1 else 0)
 
     fun total(): Long = total.get()
+
+    fun activeCount(): Int = panels.count { active[it.index] == 1 }
 
     fun missing(): Long = panels.sumOf { it.size - written[it.index] }
 

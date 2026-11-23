@@ -42,7 +42,7 @@ data class SettingsResponse(
     /** 每个任务的分段数（并发连接数按任务算）。 */
     val segmentCount: Int = 8,
     /** 所有任务共用的连接预算。 */
-    val maxConnections: Int = 32,
+    val maxConnections: Int = 16,
     /** 同一文件是否并行使用第二条签名直链。 */
     val dualSignedUrls: Boolean = false,
     /** 下载诊断指标日志是否开启。 */
@@ -84,7 +84,7 @@ data class DownloadDirResponse(val downloadDir: String)
 @Serializable
 data class DownloadTuningRequest(
     val segments: Int = 8,
-    val maxConnections: Int = 32,
+    val maxConnections: Int = 16,
     val dualSignedUrls: Boolean? = null,
     val downloadDiagnostics: Boolean? = null,
 )
