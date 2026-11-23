@@ -15,9 +15,9 @@ data class ServerSettings(
     /** 每个下载任务切成几段并发拉（1–32）。 */
     val segmentCount: Int = 8,
     /**
-     * 所有下载任务共用的连接上限（4–64）。
-     * 默认 16 = SDK 的 `DEFAULT_ACCOUNT_CONNECTION_BUDGET`：PikPak 的 CDN 按账号/IP 限并发，
-     * 超过这个量会先断连（IOException: closed）、再回 503，批量下载就会集体失败。
+     * 所有下载任务共用的连接天花板（4–64）。
+     * 实际并发从 16 起步，遇到 CDN 限流（closed / 503 / 零字节响应）会自动减半并冷却，
+     * 稳定后再缓慢加回，但永远不超过这个值。
      */
     val maxConnections: Int = 16,
     /** 同一文件再取一条不同签名的直链并行分段（≥16 MiB 的文件才启用；默认关闭）。 */

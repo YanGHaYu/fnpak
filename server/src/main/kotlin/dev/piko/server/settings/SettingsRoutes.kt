@@ -1,6 +1,5 @@
 package dev.piko.server.settings
 
-import dev.piko.server.ACCOUNT_CONNECTION_LIMIT
 import dev.piko.server.AccessTokenSettings
 import dev.piko.server.ChangeAccessTokenRequest
 import dev.piko.server.DownloadDirRequest
@@ -81,13 +80,11 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 "maxConnections 必须在 4–64 之间：${body.maxConnections}")
             return@post
         }
-        // 超过账号级并发上限的部分不落地：CDN 会断连/503，配了也只会让批量下载更容易失败。
-        val capped = body.maxConnections.coerceAtMost(ACCOUNT_CONNECTION_LIMIT)
         runCatching {
             graph.updateSettings { current ->
                 current.copy(
                     segmentCount = body.segments,
-                    maxConnections = capped,
+                    maxConnections = body.maxConnections,
                     dualSignedUrls = body.dualSignedUrls ?: current.dualSignedUrls,
                     downloadDiagnostics = body.downloadDiagnostics ?: current.downloadDiagnostics,
                 )
@@ -102,20 +99,19 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 return@post
             }
         graph.downloadTuning.updateSegments(body.segments)
-        graph.connectionBudget.updateLimit(capped)
+        graph.connectionBudget.updateLimit(body.maxConnections)
         graph.downloadTuning.updateAcceleration(
             dual = body.dualSignedUrls ?: graph.downloadTuning.dualSignedUrls,
             diagnostics = body.downloadDiagnostics ?: graph.downloadTuning.downloadDiagnostics,
         )
         PikoLog.w(TAG, "下载并发已更新：来源=${call.remoteIp()}，每任务 ${body.segments} 段，" +
-            "全局连接上限 $capped" +
-            (if (capped != body.maxConnections) "（填写 ${body.maxConnections}，按账号上限 $ACCOUNT_CONNECTION_LIMIT 收敛）" else "") +
-            "，双直链=${graph.downloadTuning.dualSignedUrls}，" +
+            "并发天花板 ${body.maxConnections}，当前允许 ${graph.connectionBudget.max}（自适应会在遇到限流时自动降低），" +
+            "双直链=${graph.downloadTuning.dualSignedUrls}，" +
             "诊断=${graph.downloadTuning.downloadDiagnostics}（进行中的任务仍按启动时的参数）")
         call.respond(
             DownloadTuningResponse(
                 segments = body.segments,
-                maxConnections = capped,
+                maxConnections = graph.connectionBudget.maxCeiling,
                 dualSignedUrls = graph.downloadTuning.dualSignedUrls,
                 downloadDiagnostics = graph.downloadTuning.downloadDiagnostics,
             ),

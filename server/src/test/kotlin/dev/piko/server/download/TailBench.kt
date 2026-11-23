@@ -7,7 +7,10 @@ import dev.piko.shared.log.PikoLog
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.file.Files
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.time.TimeSource
 import kotlinx.coroutines.Dispatchers
@@ -16,13 +19,26 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 
 /**
- * 离线掉速验收台：本地假 CDN 给每条连接限速，再按「完成度」采样聚合速度。
- * 对比旧分段数（factor=1）与细分后的分段数（factor=8）：前者尾部只剩 1 条连接，后者能跑满。
+ * 离线并发/限流验收台：本地假 CDN 可以分别限制「账号总并发」「单签名 URL 并发」，
+ * 并在越界后进入惩罚窗口（回 503，或模拟真机那种「声明了 content-length 却 0 字节直接断开」）。
  *
- * 用法：`--panel-factor 1|8 --total 134217728 --rate 1048576 --tasks 1`
- * 结果只打印到 stdout，不写仓库文件。
+ * 用法示例：
+ *   --tasks 3 --budget 16 --initial 16 --adaptive 1 --lanes 2 --max-conns 6 --url-conns 4 --penalty drop --ban-ms 20000
+ *   --tasks 3 --budget 16 --initial 16 --adaptive 0 --lanes 2 --max-conns 6 --url-conns 4 --penalty drop --ban-ms 20000
  */
 private const val MIB = 1024L * 1024L
+
+private class Cdn(
+    @Volatile var accountCap: Int,
+    @Volatile var urlCap: Int,
+    @Volatile var banMs: Long,
+    @Volatile var penalty: String,
+) {
+    val activeByUrl = ConcurrentHashMap<String, AtomicInteger>()
+    val total = AtomicInteger(0)
+    val bannedUntil = AtomicLong(0)
+    val penalties = AtomicInteger(0)
+}
 
 fun main(args: Array<String>) = runBlocking {
     var factor = 8
@@ -30,9 +46,14 @@ fun main(args: Array<String>) = runBlocking {
     var rate = 1L * MIB
     var tasks = 1
     var slowEvery = 0
-    var budgetMax = DownloadTuning.DEFAULT_MAX_CONNECTIONS
+    var ceiling = DownloadTuning.DEFAULT_MAX_CONNECTIONS
+    var initial = 0
+    var adaptive = true
     var maxConns = 0
+    var urlConns = 0
     var banMs = 0L
+    var penalty = "503"
+    var lanes = 1
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -41,70 +62,108 @@ fun main(args: Array<String>) = runBlocking {
             "--rate" -> rate = args[++index].toLong()
             "--tasks" -> tasks = args[++index].toInt()
             "--slow-every" -> slowEvery = args[++index].toInt()
-            "--budget" -> budgetMax = args[++index].toInt()
+            "--budget" -> ceiling = args[++index].toInt()
+            "--initial" -> initial = args[++index].toInt()
+            "--adaptive" -> adaptive = args[++index] == "1"
             "--max-conns" -> maxConns = args[++index].toInt()
+            "--url-conns" -> urlConns = args[++index].toInt()
             "--ban-ms" -> banMs = args[++index].toLong()
+            "--penalty" -> penalty = args[++index]
+            "--lanes" -> lanes = args[++index].toInt()
         }
         index++
     }
     System.setProperty("piko.download.panelFactor", factor.toString())
-    File(System.getProperty("java.io.tmpdir"), "piko-tail-bench").mkdirs()
-    PikoLog.install(File(System.getProperty("java.io.tmpdir"), "piko-tail-bench").absolutePath) { level, tag, message, error ->
+    val logDir = File(System.getProperty("java.io.tmpdir"), "piko-tail-bench").apply { mkdirs() }
+    PikoLog.install(logDir.absolutePath) { level, tag, message, error ->
         if (level.letter != 'I') println("[${level.letter}][$tag] $message${error?.let { " | ${it::class.simpleName}: ${it.message}" }.orEmpty()}")
     }
 
+    val cdn = Cdn(maxConns, urlConns, banMs, penalty)
+    val requestSeq = AtomicInteger()
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.executor = Executors.newCachedThreadPool()
-    val requestSeq = java.util.concurrent.atomic.AtomicInteger()
-    val active = java.util.concurrent.atomic.AtomicInteger()
-    val bannedUntil = java.util.concurrent.atomic.AtomicLong(0L)
     server.createContext("/f") { exchange ->
         val seq = requestSeq.incrementAndGet()
-        // 账号/IP 级并发上限：超出的连接直接 503；被动断连一次后进入 banMs 冷却期（PikPak CDN 的真实行为）。
-        if (maxConns > 0) {
-            val now = System.currentTimeMillis()
-            if (now < bannedUntil.get()) {
-                reply503(exchange)
-                return@createContext
-            }
-            if (active.incrementAndGet() > maxConns) {
-                active.decrementAndGet()
-                bannedUntil.set(now + banMs)
-                reply503(exchange)
-                return@createContext
-            }
+        val key = exchange.requestURI.query ?: "u=0"
+        val now = System.currentTimeMillis()
+        if (now < cdn.bannedUntil.get()) {
+            cdn.penalties.incrementAndGet()
+            penalize(exchange, total, cdn)
+            return@createContext
+        }
+        val urlActive = cdn.activeByUrl.getOrPut(key) { AtomicInteger(0) }
+        val totalActive = cdn.total.incrementAndGet()
+        val urlNow = urlActive.incrementAndGet()
+        val over = (cdn.accountCap > 0 && totalActive > cdn.accountCap) ||
+            (cdn.urlCap > 0 && urlNow > cdn.urlCap)
+        if (over) {
+            cdn.total.decrementAndGet()
+            urlActive.decrementAndGet()
+            if (cdn.banMs > 0) cdn.bannedUntil.set(now + cdn.banMs)
+            cdn.penalties.incrementAndGet()
+            penalize(exchange, total, cdn)
+            return@createContext
         }
         try {
-            // 每 slowEvery 个请求模拟一条慢连接（CDN 不同边缘节点的速率差），这是旧分段最怕的情况：
-            // 一个慢分段会把尾部拖成单连接低速；细分后慢的只是一个 1–2 MiB 的小段。
             val effective = if (slowEvery > 0 && seq % slowEvery == 0) (rate / 5).coerceAtLeast(32 * 1024L) else rate
             serve(exchange, total, effective)
         } finally {
-            if (maxConns > 0) active.decrementAndGet()
+            cdn.total.decrementAndGet()
+            urlActive.decrementAndGet()
         }
     }
     server.start()
-    val url = "http://127.0.0.1:${server.address.port}/f"
-    println("[tail] panelFactor=$factor total=${total / MIB}MiB rate=${rate / 1024}KiB/s per-conn slowEvery=$slowEvery tasks=$tasks budget=$budgetMax cdnMaxConns=$maxConns banMs=$banMs")
+    val port = server.address.port
+    val base = "http://127.0.0.1:$port/f"
+    val startAt = if (initial > 0) initial else minOf(16, ceiling)
+    println(
+        "[cdn] tasks=$tasks lanes=$lanes total=${total / MIB}MiB rate=${rate / 1024}KiB/s " +
+            "accountCap=$maxConns urlCap=$urlConns penalty=$penalty ban=${banMs}ms | " +
+            "budget=$ceiling initial=$startAt adaptive=$adaptive",
+    )
 
-    val budget = ConnectionBudget(budgetMax)
+    val budget = ConnectionBudget(ceiling, initialLimit = startAt, adaptive = adaptive)
     val started = TimeSource.Monotonic.markNow()
     val results = (1..tasks).map { i ->
-        async(Dispatchers.IO) { sample("task$i", url, total, budget, factor) }
+        async(Dispatchers.IO) {
+            sample(
+                name = "task$i",
+                primaryUrl = "$base?u=task$i-a",
+                secondUrl = if (lanes >= 2) "$base?u=task$i-b" else null,
+                total = total,
+                budget = budget,
+                adaptiveDownloads = adaptive,
+            )
+        }
     }.awaitAll()
     val elapsed = started.elapsedNow().inWholeMilliseconds.coerceAtLeast(1)
     results.forEach { println(it) }
-    println("[tail] 总耗时 $elapsed ms，峰值连接 ${budget.peak}，成功 ${results.count { !it.contains("FAILED") }}/$tasks")
+    println(
+        "[result] 总耗时 $elapsed ms，成功 ${results.count { !it.contains("FAILED") }}/$tasks，" +
+            "峰值连接 ${budget.peak}，最终允许并发 ${budget.max}/${budget.maxCeiling}，CDN 惩罚次数 ${cdn.penalties.get()}",
+    )
     server.stop(0)
 }
 
-private suspend fun sample(name: String, url: String, total: Long, budget: ConnectionBudget, factor: Int): String {
+private suspend fun sample(
+    name: String,
+    primaryUrl: String,
+    secondUrl: String?,
+    total: Long,
+    budget: ConnectionBudget,
+    adaptiveDownloads: Boolean,
+): String {
     val target = Files.createTempFile("tail-$name-", ".bin").toFile()
     target.deleteOnExit()
-    val tuning = DownloadTuning(8, 64)
-    val downloader = SegmentDownloader(urlProvider = { url }, budget = budget, tuning = tuning)
+    val tuning = DownloadTuning(8, 64, dualSignedUrls = secondUrl != null)
+    val downloader = SegmentDownloader(
+        urlProvider = { primaryUrl },
+        secondUrlProvider = secondUrl?.let { { _: String -> it } },
+        budget = budget,
+        tuning = tuning,
+    )
     val marks = sortedMapOf<Int, Long>()
-    val samples = mutableListOf<Pair<Long, Long>>()
     val start = TimeSource.Monotonic.markNow()
     var failure: String? = null
     try {
@@ -116,7 +175,6 @@ private suspend fun sample(name: String, url: String, total: Long, budget: Conne
             completedRanges = emptyList(),
             onProgress = { progress: DirectDownloadProgress ->
                 val pct = (progress.downloadedBytes * 100 / total).toInt()
-                samples += pct.toLong() to progress.speedBytesPerSec
                 for (threshold in THRESHOLDS) {
                     if (pct >= threshold && threshold !in marks) marks[threshold] = progress.speedBytesPerSec
                 }
@@ -129,17 +187,31 @@ private suspend fun sample(name: String, url: String, total: Long, budget: Conne
         downloader.close()
     }
     val wall = start.elapsedNow().inWholeMilliseconds.coerceAtLeast(1)
+    val tail = "budget=${budget.max}/${budget.maxCeiling}" + if (adaptiveDownloads) "(自适应)" else "(固定)"
     if (failure != null) {
-        return "[tail][$name] FAILED after $wall ms：$failure | 最高完成度 ${(marks.keys.maxOrNull() ?: 0)}%"
+        return "[task][$name] FAILED after $wall ms：$failure | 最高完成度 ${(marks.keys.maxOrNull() ?: 0)}% | $tail"
     }
     val curve = THRESHOLDS.joinToString(" ") { t -> "$t%=${((marks[t] ?: 0L) / 1024)}KiB/s" }
-    return "[tail][$name] 用时 $wall ms，平均 ${total * 1000 / wall / 1024} KiB/s | $curve"
+    return "[task][$name] 用时 $wall ms，平均 ${total * 1000 / wall / 1024} KiB/s | $curve | $tail"
 }
 
-private val THRESHOLDS = listOf(10, 25, 50, 75, 85, 90, 95, 99)
+private val THRESHOLDS = listOf(50, 85, 95, 99)
 
-/** 模拟 CDN 对超出并发/进入冷却期的请求直接回 503。 */
-private fun reply503(exchange: HttpExchange) {
+/** 越界/惩罚窗口内的响应：503 或「声明长度但 0 字节就断开」。 */
+private fun penalize(exchange: HttpExchange, total: Long, cdn: Cdn) {
+    if (cdn.penalty == "drop") {
+        try {
+            val (start, end, status) = rangeOf(exchange, total)
+            if (status == 206) exchange.responseHeaders.add("Content-Range", "bytes $start-$end/$total")
+            exchange.responseHeaders.add("Content-Type", "application/octet-stream")
+            // 只发响应头就断开：客户端会收到 "fixed content-length: N, bytes received: 0"
+            exchange.sendResponseHeaders(status, end - start + 1)
+        } catch (_: Exception) {
+        } finally {
+            runCatching { exchange.close() }
+        }
+        return
+    }
     try {
         val body = "busy".toByteArray()
         exchange.sendResponseHeaders(503, body.size.toLong())
@@ -150,20 +222,20 @@ private fun reply503(exchange: HttpExchange) {
     }
 }
 
+private fun rangeOf(exchange: HttpExchange, total: Long): Triple<Long, Long, Int> {
+    val range = exchange.requestHeaders.getFirst("Range")
+    if (range == null || !range.startsWith("bytes=")) return Triple(0L, total - 1, 200)
+    val spec = range.removePrefix("bytes=").substringBefore(',')
+    val from = spec.substringBefore('-').toLongOrNull() ?: 0L
+    val to = spec.substringAfter('-').toLongOrNull()
+    val start = from.coerceIn(0, total - 1)
+    val end = (to ?: (total - 1)).coerceIn(start, total - 1)
+    return Triple(start, end, 206)
+}
+
 private fun serve(exchange: HttpExchange, total: Long, rate: Long) {
     try {
-        val range = exchange.requestHeaders.getFirst("Range")
-        var start = 0L
-        var end = total - 1
-        var status = 200
-        if (range != null && range.startsWith("bytes=")) {
-            val spec = range.removePrefix("bytes=").substringBefore(',')
-            val from = spec.substringBefore('-').toLongOrNull() ?: 0L
-            val to = spec.substringAfter('-').toLongOrNull()
-            start = from.coerceIn(0, total - 1)
-            end = (to ?: (total - 1)).coerceIn(start, total - 1)
-            status = 206
-        }
+        val (start, end, status) = rangeOf(exchange, total)
         val length = end - start + 1
         exchange.responseHeaders.add("Content-Type", "application/octet-stream")
         exchange.responseHeaders.add("Accept-Ranges", "bytes")

@@ -41,7 +41,7 @@ data class SettingsResponse(
     val downloadDir: String,
     /** 每个任务的分段数（并发连接数按任务算）。 */
     val segmentCount: Int = 8,
-    /** 所有任务共用的连接预算。 */
+    /** 所有任务共用的连接天花板；实际并发从 16 起步并自适应降级。 */
     val maxConnections: Int = 16,
     /** 同一文件是否并行使用第二条签名直链。 */
     val dualSignedUrls: Boolean = false,

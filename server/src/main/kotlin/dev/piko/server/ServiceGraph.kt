@@ -3,6 +3,7 @@ package dev.piko.server
 import dev.piko.server.auth.CaptchaChallengeStore
 import dev.piko.server.auth.LoginAttemptLimiter
 import dev.piko.server.auth.PikPakCaptchaClient
+import dev.piko.server.download.ADAPTIVE_INITIAL_CONNECTIONS
 import dev.piko.server.download.ConnectionBudget
 import dev.piko.server.download.DownloadGroupRegistry
 import dev.piko.server.download.DownloadTuning
@@ -30,12 +31,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-
-/**
- * PikPak CDN 的账号级并发经验上限，与 SDK 的 `DEFAULT_ACCOUNT_CONNECTION_BUDGET` 一致。
- * 多任务批量下载时，连接数超过它就会先被断连（IOException: closed）再收到 503。
- */
-const val ACCOUNT_CONNECTION_LIMIT = 16
 
 /**
  * 服务端的依赖容器，替代 `:ui` 的 `PikoServices`。
@@ -128,13 +123,10 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     )
 
     /**
-     * 实际生效的全局连接上限：设置页仍允许填 4–64，但超过账号级上限的部分不会真的开出去，
-     * 否则文件夹批量下载（默认 3 个任务并发 × 双直链 16 条）会把 PikPak 打到断连 + 503。
+     * 全局并发预算：起始 [ADAPTIVE_INITIAL_CONNECTIONS] 条，遇到限流信号自动减半并冷却，
+     * 稳定后再缓慢加回；设置页配置值是天花板。
      */
-    private val effectiveMaxConnections: Int
-        get() = settings.maxConnections.coerceAtMost(ACCOUNT_CONNECTION_LIMIT)
-
-    val connectionBudget = ConnectionBudget(effectiveMaxConnections)
+    val connectionBudget = ConnectionBudget(settings.maxConnections)
 
     /** 取一次文件详情并挑出可用直链；同一文件再取一次会拿到另一份签名（同签名时第二 lane 自动放弃）。 */
     private val directUrlProvider: suspend (String) -> String = { fileId ->
@@ -182,15 +174,11 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     init {
         downloadCoordinator.bindDefaultFolderSource(serverFolderSource)
-        // 配置 32 在单文件时看着更快，但文件夹批量下载会多任务叠加，超过 PikPak 账号级并发上限后
-        // CDN 先断连再回 503，任务会整体失败。这里把真实生效值写进日志，方便对账。
-        if (settings.maxConnections > ACCOUNT_CONNECTION_LIMIT) {
-            PikoLog.w(
-                "FNPak",
-                "全局连接上限配置为 ${settings.maxConnections}，超过 PikPak 账号经验上限 $ACCOUNT_CONNECTION_LIMIT，" +
-                    "实际按 $ACCOUNT_CONNECTION_LIMIT 生效（可在设置页改小以消除这条提示）",
-            )
-        }
+        PikoLog.i(
+            "FNPak",
+            "下载并发：起始 ${connectionBudget.max} 条，天花板 ${connectionBudget.maxCeiling} 条（自适应，" +
+                "遇到 closed/503/零字节响应自动降半并冷却，稳定后缓慢恢复）",
+        )
     }
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()

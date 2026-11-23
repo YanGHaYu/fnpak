@@ -53,6 +53,49 @@ private const val SPEED_WINDOW_MS = 3_000L
 private const val MAX_LINK_REFRESH = 3
 private const val MIN_PANEL_BYTES = 1L * 1024 * 1024
 
+/** 自适应并发的起始值（不是硬上限：上限由设置页配置，实际值随限流信号浮动）。 */
+const val ADAPTIVE_INITIAL_CONNECTIONS = 16
+
+/** 自适应下限：再低就没法把大文件下完，限流再狠也保留 2 条。 */
+private const val MIN_LIMIT = 2
+
+/** 首次限流后的冷却时长，之后按次翻倍，封顶 [MAX_COOLDOWN_MS]。 */
+private const val THROTTLE_COOLDOWN_MS = 3_000L
+private const val MAX_COOLDOWN_MS = 30_000L
+
+/** 冷却结束后稳定这么久才允许 +1 探测，避免刚恢复又撞上限流。 */
+private const val STABLE_BEFORE_RAMP_MS = 15_000L
+
+/** 同一分段因限流最多等这么多轮冷却；超过就交给「单连接续传」兜底。 */
+private const val MAX_THROTTLE_WAITS = 6
+
+/**
+ * 识别「被 CDN 限流/惩罚」的异常特征，返回给日志用的原因；普通网络错误返回 null。
+ *
+ * 这些形态都来自同一种情况——请求被受理，但响应体被掐断：
+ * - `closed`：连接在响应前/响应中被对端关闭；
+ * - `HTTP 503`：CDN 的过载/限流响应；
+ * - `fixed content-length: N, bytes received: 0`（JDK HttpClient 的报文）：声明了长度却 0 字节；
+ * - `EOF reached while reading`：读流时对端提前关闭；
+ * - `reset`：连接被重置。
+ */
+internal fun throttleSignal(error: Throwable): String? {
+    val text = generateSequence(error) { it.cause }
+        .mapNotNull { it.message }
+        .joinToString(" | ")
+        .lowercase()
+    return when {
+        text.contains("http 503") -> "HTTP 503"
+        text.contains("http 429") -> "HTTP 429"
+        text.contains("bytes received: 0") -> "零字节响应"
+        text.contains("eof reached") -> "响应体提前结束"
+        text.contains("closed") -> "连接被关闭"
+        text.contains("reset") -> "连接被重置"
+        else -> null
+    }
+}
+
+
 /** 每个下载任务各打一行「完成度/速度/活跃分段」，用于判断尾部掉速是并发降了还是单连接变慢。 */
 private val PROGRESS_MILESTONES = intArrayOf(10, 25, 50, 75, 90, 95, 99)
 
@@ -132,9 +175,17 @@ class DownloadTuning(
  * 由自己排队，唤醒时直接把名额移交，活跃数不会短暂超过上限。
  */
 class ConnectionBudget(
-    initialLimit: Int,
+    /** 并发上限的天花板（设置页配置值）：自适应只在这个值以内波动。 */
+    ceilingLimit: Int,
+    /**
+     * 起始并发。自适应模式下默认 16，被限流后自动减半、稳定后再慢慢加回来；
+     * 固定模式（[adaptive] = false）下这就是唯一并发值。
+     */
+    initialLimit: Int = minOf(ADAPTIVE_INITIAL_CONNECTIONS, ceilingLimit),
     /** 等待者超过这个时长还没拿到名额时，做一次「持有者协程已结束」的残留名额回收。 */
     private val reclaimAfterMs: Long = RECLAIM_AFTER_MS,
+    /** 关闭后退化为固定并发，仅用于离线对照。 */
+    private val adaptive: Boolean = true,
 ) {
     /**
      * 一次申请到的名额。归还幂等：被自愈回收之后，原持有者的 `finally` 再归还也不会多减。
@@ -146,7 +197,27 @@ class ConnectionBudget(
     }
 
     private val lock = Mutex()
-    private var limit = initialLimit.coerceIn(1, 128)
+
+    @Volatile
+    private var ceiling = ceilingLimit.coerceIn(1, 128)
+
+    @Volatile
+    private var limit = initialLimit.coerceIn(1, ceiling)
+
+    /** 冷却窗口结束时刻（`System.nanoTime`）；窗口内不发起任何新的分段请求。 */
+    @Volatile
+    private var cooldownUntilNs = 0L
+
+    /** 下一次限流信号的冷却时长：3s 起，按次翻倍，最长 30s。 */
+    @Volatile
+    private var cooldownBackoffMs = 0L
+
+    /** 上一次限流（或启动）之后保持稳定的起点，用来决定何时开始 +1 探测。 */
+    @Volatile
+    private var stableSinceNs = System.nanoTime()
+
+    @Volatile
+    private var lastThrottleReason = ""
     private val held = mutableSetOf<Permit>()
     private val waiters = ArrayDeque<Permit>()
 
@@ -161,35 +232,111 @@ class ConnectionBudget(
 
     val current: Int get() = active
     val peak: Int get() = peakActive
+
+    /** 当前允许的并发（自适应模式下会随限流信号上下浮动）。 */
     val max: Int get() = limit
+
+    /** 用户配置的天花板。 */
+    val maxCeiling: Int get() = ceiling
+
+    val adaptiveMode: Boolean get() = adaptive
+
+    /** 冷却剩余毫秒数；0 表示不在冷却窗口内。 */
+    fun cooldownRemainingMs(): Long {
+        val remain = cooldownUntilNs - System.nanoTime()
+        return if (remain <= 0L) 0L else remain / 1_000_000 + 1
+    }
+
+    /** 等到冷却结束，返回实际等待的毫秒数（供日志使用）。 */
+    suspend fun awaitCooldown(): Long {
+        val remain = cooldownRemainingMs()
+        if (remain > 0L) delay(remain)
+        return remain
+    }
+
+    /**
+     * 收到限流信号（`closed` / 503 / 零字节响应）时调用：并发减半并进入冷却窗口。
+     * 冷却期内重复上报直接忽略——一次限流会让上百个分段同时失败，逐个翻倍会把退避拖成天文数字。
+     */
+    @Synchronized
+    fun onThrottle(reason: String) {
+        if (!adaptive) return
+        val now = System.nanoTime()
+        if (now < cooldownUntilNs) return
+        val old = limit
+        val next = (old / 2).coerceAtLeast(MIN_LIMIT).coerceAtMost(ceiling)
+        cooldownBackoffMs = if (cooldownBackoffMs == 0L) {
+            THROTTLE_COOLDOWN_MS
+        } else {
+            (cooldownBackoffMs * 2).coerceAtMost(MAX_COOLDOWN_MS)
+        }
+        cooldownUntilNs = now + cooldownBackoffMs * 1_000_000
+        limit = next
+        stableSinceNs = now
+        lastThrottleReason = reason
+        PikoLog.w(
+            TAG,
+            "限流信号（$reason）：全局并发 $old→$next（上限 $ceiling），冷却 ${cooldownBackoffMs} ms，在途 $active",
+        )
+    }
+
+    /** 每成功拉完一段调用一次：冷却结束后稳定 [STABLE_BEFORE_RAMP_MS]，缓慢 +1 探测。 */
+    @Synchronized
+    fun noteSuccess() {
+        if (!adaptive) return
+        val now = System.nanoTime()
+        if (now < cooldownUntilNs) return
+        if (now - stableSinceNs < STABLE_BEFORE_RAMP_MS * 1_000_000) return
+        val old = limit
+        if (old < ceiling) {
+            limit = old + 1
+            PikoLog.i(TAG, "限流后恢复探测（上次原因：${lastThrottleReason.ifBlank { "无" }}）：全局并发 $old→${old + 1}")
+        }
+        cooldownBackoffMs = 0L
+        lastThrottleReason = ""
+        stableSinceNs = now
+    }
 
     /** 正在等名额的分段数：正常下载里接近 0，长期大于 0 说明名额可能没还回来。 */
     val waiting: Int get() = waitingCount
 
     suspend fun acquire(): Permit {
-        val permit = Permit(currentCoroutineContext()[Job])
-        val queued = lock.withLock {
-            if (held.size < limit) {
-                grantLocked(permit)
-                false
-            } else {
-                waiters.addLast(permit)
-                waitingCount = waiters.size
-                true
+        while (true) {
+            // 冷却期内不发起任何新请求：对端已经把连接掐了，继续怼只会把惩罚窗口拖长
+            awaitCooldown()
+            val permit = Permit(currentCoroutineContext()[Job])
+            val queued = lock.withLock {
+                if (held.size < limit) {
+                    grantLocked(permit)
+                    false
+                } else {
+                    waiters.addLast(permit)
+                    waitingCount = waiters.size
+                    true
+                }
             }
+            if (queued) {
+                awaitGranted(permit)
+                // 排队期间上限可能被限流信号调低：拿到名额后重新核对，超了就还回去重排，
+                // 否则「下调后的并发」只是账面数字，冷却结束那一刻仍会一次冲出十几条连接。
+                if (active <= limit) return permit
+                release(permit)
+                continue
+            }
+            if (active <= limit) return permit
+            release(permit)
         }
-        if (!queued) return permit
+    }
+
+    private suspend fun awaitGranted(permit: Permit) {
         try {
             while (true) {
                 // 正常下载名额是「释放即移交」，等待者几乎不会真的等这么久；能走到这里说明有
                 // 持有者的协程已经结束却没把名额还回来（取消路径漏归还、进程内遗留等）。
-                if (withTimeoutOrNull(reclaimAfterMs) { permit.granted.await() } != null) return permit
+                if (withTimeoutOrNull(reclaimAfterMs) { permit.granted.await() } != null) return
                 reclaimOrphans()
             }
         } catch (e: CancellationException) {
-            // 取消时必须把等待者从队列里摘掉：否则 release() 会把名额移交给一个已经没人等待的
-            // Deferred，active 永远减不下去，之后所有分段都卡在申请名额（任务停在 DOWNLOADING 0 字节，
-            // 后面的任务一直 PENDING）。
             withContext(NonCancellable) {
                 if (permit.granted.isCompleted) {
                     // 已经被 release() 移交（名额记到了这个等待者头上）：自己再还回去
@@ -224,9 +371,12 @@ class ConnectionBudget(
     }
 
     suspend fun updateLimit(value: Int) {
+        val capped = value.coerceIn(1, 128)
         val wake = mutableListOf<Permit>()
         lock.withLock {
-            limit = value.coerceIn(1, 128)
+            ceiling = capped
+            // 自适应模式只移动天花板，当前并发交给控制器自己降/涨；固定模式直接生效
+            limit = if (adaptive) limit.coerceIn(MIN_LIMIT, ceiling) else capped
             while (held.size < limit && waiters.isNotEmpty()) {
                 wake += waiters.removeFirst().also { grantLocked(it) }
                 waitingCount = waiters.size
@@ -342,11 +492,17 @@ class SegmentDownloader(
                 "${error::class.simpleName}: ${error.message}")
             throw error
         }
+        val host = runCatching { URI.create(initialUrl).host }.getOrNull() ?: "?"
         val holder = UrlHolder(fileId, urlProvider, initialUrl, PER_URL_CONNECTIONS)
         try {
             if (raf.length() != totalBytes) raf.setLength(totalBytes)
-            PikoLog.i(TAG, "分段下载：$fileName，$totalBytes 字节，${panels.size} 段，已落盘 ${book.total()} 字节，" +
-                "连接预算 ${budget.max}" + if (dualEnabled) "，准备第二条签名直链" else "")
+            PikoLog.i(
+                TAG,
+                "分段下载：$fileName，$totalBytes 字节，${panels.size} 段，已落盘 ${book.total()} 字节，" +
+                    "全局并发 ${budget.max}/${budget.maxCeiling}" +
+                    (if (budget.adaptiveMode) "（自适应）" else "（固定）") +
+                    "，host=$host" + if (dualEnabled) "，准备第二条签名直链" else "",
+            )
             try {
                 coroutineScope {
                     // 进度协程是常驻循环：分段协程全部结束后必须显式取消，否则 coroutineScope 永远不返回
@@ -386,7 +542,7 @@ class SegmentDownloader(
                 singleConnectionPass(panels, channel, holder, book, onCheckpoint, metrics)
             }
             check(book.missing() == 0L) { "仍有 ${book.missing()} 字节未完成" }
-            PikoLog.i(TAG, "分段下载收尾：$fileName，覆盖校验通过，峰值连接 ${budget.peak}/${budget.max}")
+            PikoLog.i(TAG, "分段下载收尾：$fileName，覆盖校验通过，峰值连接 ${budget.peak}/${budget.maxCeiling}，当前并发 ${budget.max}")
             metrics.logSummary(fileName, book, budget, (System.nanoTime() - startedNs) / 1_000_000)
         } finally {
             withContext(NonCancellable) {
@@ -410,6 +566,7 @@ class SegmentDownloader(
     ) {
         val startedNs = System.nanoTime()
         var attempts = 0
+        var throttleWaits = 0
         var refreshes = 0
         book.setActive(panel.index, true)
         try {
@@ -422,6 +579,8 @@ class SegmentDownloader(
                         val waitStart = System.nanoTime()
                         val permit = budget.acquire()
                         metrics.recordBudgetWait((System.nanoTime() - waitStart) / 1_000_000)
+                        // 拿到名额后可能刚好撞上新的冷却窗口：此时绝不发请求
+                        budget.awaitCooldown()
                         book.connectingStart()
                         try {
                             fetchRange(channel, holder, from, panel.end, lane, panel.index, metrics) { bytes ->
@@ -433,6 +592,8 @@ class SegmentDownloader(
                         }
                     }
                     attempts = 0
+                    throttleWaits = 0
+                    budget.noteSuccess()
                     // 一段刚下完就落一次续传点，不必等下一个 5 秒周期
                     onCheckpoint(book.spans())
                     if (panel.start + book.written(panel.index) > panel.end) return
@@ -443,6 +604,19 @@ class SegmentDownloader(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Throwable) {
+                    // 限流类失败不消耗普通重试次数：冷却窗口是全局的，重试只会把惩罚拖长
+                    val throttle = throttleSignal(error)
+                    if (throttle != null) {
+                        budget.onThrottle(throttle)
+                        if (++throttleWaits > MAX_THROTTLE_WAITS) throw SegmentFailed(panel, error)
+                        val waited = budget.awaitCooldown()
+                        PikoLog.w(
+                            TAG,
+                            "分段 ${panel.index} 命中限流（$throttle），暂停 ${waited} ms 后重试" +
+                                "（限流等待 $throttleWaits/$MAX_THROTTLE_WAITS，当前并发 ${budget.max}）",
+                        )
+                        continue
+                    }
                     if (++attempts > tuning.maxRetries) throw SegmentFailed(panel, error)
                     val wait = backoffMillis(attempts)
                     PikoLog.w(TAG, "分段 ${panel.index} 第 $attempts 次失败（${error.message}），${wait} ms 后重试")
@@ -539,6 +713,7 @@ class SegmentDownloader(
     ) {
         for (panel in panels) {
             var attempts = 0
+            var throttleWaits = 0
             var refreshes = 0
             while (true) {
                 val from = panel.start + book.written(panel.index)
@@ -548,6 +723,7 @@ class SegmentDownloader(
                         val waitStart = System.nanoTime()
                         val permit = budget.acquire()
                         metrics.recordBudgetWait((System.nanoTime() - waitStart) / 1_000_000)
+                        budget.awaitCooldown()
                         book.connectingStart()
                         try {
                             book.setActive(panel.index, true)
@@ -561,6 +737,8 @@ class SegmentDownloader(
                         }
                     }
                     attempts = 0
+                    throttleWaits = 0
+                    budget.noteSuccess()
                     onCheckpoint(book.spans())
                     if (panel.start + book.written(panel.index) > panel.end) break
                 } catch (expired: LinkExpired) {
@@ -570,6 +748,18 @@ class SegmentDownloader(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Throwable) {
+                    val throttle = throttleSignal(error)
+                    if (throttle != null) {
+                        budget.onThrottle(throttle)
+                        if (++throttleWaits > MAX_THROTTLE_WAITS) throw SegmentFailed(panel, error)
+                        val waited = budget.awaitCooldown()
+                        PikoLog.w(
+                            TAG,
+                            "单连接续传命中限流（$throttle），暂停 ${waited} ms 后重试" +
+                                "（限流等待 $throttleWaits/$MAX_THROTTLE_WAITS，当前并发 ${budget.max}）",
+                        )
+                        continue
+                    }
                     if (++attempts > tuning.maxRetries) throw SegmentFailed(panel, error)
                     val wait = backoffMillis(attempts)
                     PikoLog.w(TAG, "单连接续传第 $attempts 次失败（${error.message}），${wait} ms 后重试")
