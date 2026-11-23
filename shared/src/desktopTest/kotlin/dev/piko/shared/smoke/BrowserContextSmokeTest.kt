@@ -3,6 +3,7 @@ package dev.piko.shared.smoke
 import dev.piko.data.repository.FileCategory
 import dev.piko.shared.data.PikoClientProvider
 import dev.piko.shared.data.PikoDriveRepository
+import dev.piko.shared.data.PikoFileSortOrder
 import dev.piko.shared.data.PikoPathBreadcrumb
 import dev.piko.shared.data.PikoCacheStore
 import dev.piko.shared.data.ScrollAnchor
@@ -12,7 +13,6 @@ import dev.piko.shared.state.AccountExecutionScopes
 import dev.piko.shared.state.DriveBrowserSession
 import dev.piko.shared.state.DuplicateFinderState
 import dev.piko.shared.state.DuplicateSession
-import dev.piko.shared.state.TrashSession
 import dev.piko.shared.state.DriveListItem
 import io.github.nihildigit.pikpak.InMemorySessionStore
 import io.github.nihildigit.pikpak.PikPakClient
@@ -74,6 +74,8 @@ class BrowserContextSmokeTest {
             }
             val first = rig.browsers.forTab(rig.workspace.activeTabId.value)
             val second = rig.browsers.forTab(rig.workspace.openTab(listOf(PikoDriveRepository.ROOT_BREADCRUMB)))
+            first.state.changeSortOrder(PikoFileSortOrder.NAME_ASC)
+            second.state.changeSortOrder(PikoFileSortOrder.NAME_ASC)
             first.state.load()
             second.state.load()
             awaitUntil("两份结构化列表就绪") {
@@ -128,7 +130,7 @@ class BrowserContextSmokeTest {
         val workspace = DriveWorkspace(repository, slowCache, scope)
         val duplicates = DuplicateSession({ scope }) { child, root -> DuplicateFinderState(provider, repository, child, root) }
         val browser = DriveBrowserSession(
-            repository, MemoryPreferences(), duplicates, null, TrashSession(repository, scope), scope,
+            repository, MemoryPreferences(), duplicates, null, scope,
             fileNavigation = workspace.navigationForTab(workspace.activeTabId.value),
         )
         try {
@@ -154,14 +156,13 @@ class BrowserContextSmokeTest {
         val repository = PikoDriveRepository(provider, prefs)
         val workspace = DriveWorkspace(repository, backgroundScope = scope)
         val operations = AccountExecutionScopes(repository, executionParent)
-        val cleanup = TrashSession(repository, scope)
         val duplicates = DuplicateSession(
             { CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job])) },
             { child, root -> DuplicateFinderState(provider, repository, child, root) },
         )
         val browsers = DriveBrowserStore { id ->
             DriveBrowserSession(
-                repository, prefs, duplicates, null, cleanup, scope,
+                repository, prefs, duplicates, null, scope,
                 fileNavigation = workspace.navigationForTab(id), clipboard = workspace.clipboard,
                 operationScope = operations.forAccount(requireNotNull(repository.currentAccount)),
             )

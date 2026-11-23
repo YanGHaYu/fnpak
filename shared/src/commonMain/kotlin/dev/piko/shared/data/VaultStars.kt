@@ -1,5 +1,7 @@
 package dev.piko.shared.data
 
+import dev.piko.shared.log.PikoLog
+import dev.piko.shared.log.logFailure
 import io.github.nihildigit.pikpak.FileStat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlin.concurrent.Volatile
@@ -243,14 +246,45 @@ class VaultStars internal constructor(
 
     /** 归档条目在清单中改名后，同步更新星标账本里的名称。 */
     fun renameEntry(entryId: String, newName: String, nowMs: Long = now(), expectedAccount: String? = null) {
+        renameEntries(mapOf(entryId to newName), nowMs = nowMs, expectedAccount = expectedAccount)
+    }
+
+    /** 批量同步归档条目改名到星标账本。 */
+    fun renameEntries(renames: Map<String, String>, nowMs: Long = now(), expectedAccount: String? = null) {
+        if (renames.isEmpty()) return
         var changed = false
         state.update { cur ->
             if (expectedAccount != null && cur.account != expectedAccount) return@update cur
-            val prev = cur.records[entryId] ?: return@update cur
-            if (prev.name == newName) return@update cur
-            val stamp = maxOf(nowMs, prev.updatedAt + 1L)
-            changed = true
-            cur.copy(records = cur.records + (entryId to prev.copy(name = newName, updatedAt = stamp)))
+            var next: LinkedHashMap<String, VaultStarRecord>? = null
+            for ((entryId, newName) in renames) {
+                val prev = (next ?: cur.records)[entryId] ?: continue
+                if (prev.name == newName) continue
+                val map = next ?: LinkedHashMap(cur.records).also { next = it }
+                val stamp = maxOf(nowMs, prev.updatedAt + 1L)
+                map[entryId] = prev.copy(name = newName, updatedAt = stamp)
+                changed = true
+            }
+            if (changed && next != null) cur.copy(records = next!!) else cur
+        }
+        if (changed) scheduleSave()
+    }
+
+    /** 归档条目跨目录移动后，同步更新星标账本里的所在目录，避免源目录对账时误取消星标。 */
+    fun moveEntries(entryIds: Collection<String>, targetFolderId: String, nowMs: Long = now(), expectedAccount: String? = null) {
+        if (entryIds.isEmpty()) return
+        var changed = false
+        state.update { cur ->
+            if (expectedAccount != null && cur.account != expectedAccount) return@update cur
+            var next: LinkedHashMap<String, VaultStarRecord>? = null
+            for (entryId in entryIds) {
+                val prev = (next ?: cur.records)[entryId] ?: continue
+                if (prev.folderId == targetFolderId) continue
+                val map = next ?: LinkedHashMap(cur.records).also { next = it }
+                val stamp = maxOf(nowMs, prev.updatedAt + 1L)
+                map[entryId] = prev.copy(folderId = targetFolderId, updatedAt = stamp)
+                changed = true
+            }
+            if (changed && next != null) cur.copy(records = next!!) else cur
         }
         if (changed) scheduleSave()
     }
@@ -368,7 +402,10 @@ class VaultStars internal constructor(
         state.value = AccountStarsState(account = newAccount, ready = !needsLoad, records = emptyMap())
         if (cacheStore == null || newAccount.isNullOrEmpty()) return
         scope.launch {
-            val stored = runCatching { cacheStore.read(keyOf(newAccount))?.let(::decode) }.getOrNull().orEmpty()
+            val raw = runSuspendCatching { cacheStore.read(keyOf(newAccount)) }
+                .logFailure(TAG, "Failed to read vault stars cache (acct=${logAccountSlot(newAccount)})")
+                .getOrNull()
+            val stored = raw?.let(::decode).orEmpty()
             var changed = false
             val touchedFolders = HashSet<String>()
             state.update { cur ->
@@ -393,7 +430,10 @@ class VaultStars internal constructor(
         pendingSave = scope.launch {
             delay(saveDelayMillis)
             val snapshot = state.value
-            if (snapshot.account == owner) cacheStore.write(keyOf(owner), encode(snapshot.records))
+            if (snapshot.account == owner) {
+                runSuspendCatching { cacheStore.write(keyOf(owner), encode(snapshot.records)) }
+                    .logFailure(TAG, "Failed to persist vault stars (acct=${logAccountSlot(owner)})")
+            }
         }
     }
 
@@ -407,12 +447,16 @@ class VaultStars internal constructor(
         val cacheStore = store ?: return
         val owner = previous.account ?: return
         val snapshot = previous.records
-        scope.launch { cacheStore.write(keyOf(owner), encode(snapshot)) }
+        scope.launch {
+            runSuspendCatching { cacheStore.write(keyOf(owner), encode(snapshot)) }
+                .logFailure(TAG, "Failed to flush vault stars on account switch (acct=${logAccountSlot(owner)})")
+        }
     }
 
     private fun keyOf(account: String) = "vault-stars-" + account.replace(UNSAFE_KEY_CHARS, "_") + ".json"
 
     companion object {
+        private const val TAG = "VaultStars"
         private val UNSAFE_KEY_CHARS = Regex("""[^A-Za-z0-9._@-]""")
         private val TOMBSTONE_RETENTION_MS = 90.days.inWholeMilliseconds
         private val json = Json { ignoreUnknownKeys = true }
@@ -426,6 +470,12 @@ class VaultStars internal constructor(
         fun decode(text: String): Map<String, VaultStarRecord>? =
             runCatching {
                 json.decodeFromString(serializer, text).associateBy { it.entryId }
+            }.onFailure { err ->
+                PikoLog.w(
+                    TAG,
+                    "Corrupted vault stars JSON; ignoring snapshot (chars=${text.length}, error=${err::class.simpleName})",
+                    err.takeIf { it !is SerializationException },
+                )
             }.getOrNull()
 
         private val RECORD_ORDER = compareBy<VaultStarRecord>(

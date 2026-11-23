@@ -6,8 +6,10 @@ import android.util.Log
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import okio.Path.Companion.toOkioPath
 import dev.piko.data.auth.AndroidPikoSessionStore
 import dev.piko.data.auth.SessionManager
 import dev.piko.data.repository.DriveRepository
@@ -26,12 +28,17 @@ import io.ktor.client.engine.okhttp.OkHttp
 import dev.piko.shared.data.InstantMagnetRepository
 import dev.piko.shared.data.PikoClientManager
 import java.io.File
+import dev.piko.shared.download.DownloadService
 import dev.piko.shared.download.PikoDownloadCoordinator
 import dev.piko.shared.i18n.PikoLocale
 import dev.piko.shared.log.LogLevel
 import dev.piko.shared.log.PikoLog
 import dev.piko.shared.media.FileClipCache
+import dev.piko.shared.media.MediaService
 import dev.piko.shared.media.PikoMediaRepository
+import dev.piko.shared.media.cache.CachePolicy
+import dev.piko.shared.media.cache.createJvmCacheManager
+import dev.piko.shared.media.storyboard.FileStoryboardCache
 import dev.piko.shared.memory.MemoryPolicy
 import dev.piko.shared.memory.MemoryTrim
 import dev.piko.shared.memory.PikoMemoryGovernor
@@ -48,8 +55,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -73,8 +82,8 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
     val clientManager: PikoClientManager get() = services.clientManager
     val driveRepository: DriveRepository get() = services.driveRepository
     val instantMagnetRepository: InstantMagnetRepository get() = services.instantMagnetRepository
-    val mediampMediaRepository: PikoMediaRepository get() = services.mediaRepository
-    val downloadManager: PikoDownloadCoordinator get() = services.downloadManager
+    val mediampMediaRepository: MediaService get() = services.mediaRepository
+    val downloadManager: DownloadService get() = services.downloadManager
     val uploadManager: PikoUploadCoordinator get() = services.uploadManager
     val instantSession: InstantSession get() = services.instantSession
 
@@ -86,7 +95,8 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
     }
 
     private val imageMemoryCacheMaxBytes: Long by lazy {
-        (Runtime.getRuntime().maxMemory() / 10L).coerceAtMost(32L * 1024 * 1024)
+        val maxHeap = Runtime.getRuntime().maxMemory()
+        (maxHeap / 8L).coerceIn(ANDROID_IMAGE_MIN_MEMORY_BYTES.coerceAtMost(maxHeap / 4L), ANDROID_IMAGE_MAX_MEMORY_BYTES)
     }
 
     @Volatile
@@ -133,43 +143,70 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
         instance = this
         installLog()
 
-        sessionManager = SessionManager(this)
+        sessionManager = SessionManager(this).also { it.preloadMainPreferences() }
         // 先于进程级服务与系统通知渠道初始化语言绑定，确保无 Activity 唤起或冷启动时通知渠道按用户语言注册
         val systemLocale = android.content.res.Resources.getSystem().configuration.locales.get(0) ?: java.util.Locale.getDefault()
         PikoLocale.bindSystemLocale(systemLocale.toLanguageTag())
-        PikoLocale.apply(runBlocking { sessionManager.appLanguageFlow.first() })
+        PikoLocale.apply(sessionManager.currentAppLanguage())
+        dev.piko.shared.media.player.SubtitleEncoding.install(dev.piko.shared.media.player.JvmSubtitleTextTranscoder)
+        dev.piko.shared.media.reader.DocumentTextDecoder.install(dev.piko.shared.media.reader.JvmDocumentCharsetDecoder)
         installProxy()
         val clientManager = PikoClientManager(
             sessionStore = AndroidPikoSessionStore(this),
             scope = appScope,
             transportMemoryBudgetBytes = baseTransportBudgetBytes,
+            restoreLocallyImmediately = true,
         )
+        val clipCache = FileClipCache(File(cacheDir, "piko/clip-cache"))
         val mediaRepository = PikoMediaRepository(
             clientManager,
             sessionManager,
-            clipCache = FileClipCache(File(cacheDir, "piko/clip-cache")),
+            clipCache = clipCache,
         )
         val cacheStore = FilePikoCacheStore(
             File(cacheDir, "piko").path,
             jsonCodec = Json { ignoreUnknownKeys = true }.streamingCodec(),
         )
+        val storyboardCache = FileStoryboardCache(File(cacheDir, "piko/storyboards").path)
+        val downloadManager = PikoDownloadCoordinator(
+            clientProvider = clientManager,
+            preferences = sessionManager,
+            storage = AndroidPikoDownloadStorage(this, sessionManager, appScope),
+            scope = appScope,
+            segmentDownloader = AndroidPikoSegmentDownloader(this),
+            mediaRepository = mediaRepository,
+            cacheStore = cacheStore,
+        )
+        val initialCacheSnapshot = sessionManager.currentSnapshot
+        val cacheManager = createJvmCacheManager(
+            scope = appScope,
+            imageCacheDir = File(cacheDir, "piko/image-cache"),
+            fileCachePool = downloadManager.fileCachePool,
+            storyboardCache = storyboardCache,
+            clipCache = clipCache,
+            treeIndexDir = File(cacheDir, "piko/trees"),
+            initialPolicy = CachePolicy(
+                maxTotalBytes = initialCacheSnapshot.cacheMaxBytes,
+                maxAgeDays = initialCacheSnapshot.cacheMaxAgeDays,
+            ),
+            onClearImages = {
+                initializedImageLoader?.let { loader ->
+                    loader.memoryCache?.clear()
+                    loader.diskCache?.clear()
+                }
+            },
+        )
         services = PikoServices(
             platformPreferences = sessionManager,
             clientManager = clientManager,
             mediaRepository = mediaRepository,
-            downloadManager = PikoDownloadCoordinator(
-                clientProvider = clientManager,
-                preferences = sessionManager,
-                storage = AndroidPikoDownloadStorage(this, sessionManager, appScope),
-                scope = appScope,
-                segmentDownloader = AndroidPikoSegmentDownloader(this),
-                mediaRepository = mediaRepository,
-                cacheStore = cacheStore,
-            ),
+            downloadManager = downloadManager,
             uploadSources = AndroidPikoUploadSources(this),
             localFileAccess = { changed -> dev.piko.platform.AndroidLocalFileAccess(this, appScope, changed) },
             cacheStore = cacheStore,
             treeDatabaseFactory = dev.piko.shared.data.AndroidPikoTreeDatabaseFactory(File(cacheDir, "piko/trees")),
+            storyboardCache = storyboardCache,
+            cacheManager = cacheManager,
             syncCipher = JvmSyncCipher(),
             metaTube = MetaTubeService(sessionManager, cacheStore = cacheStore, scope = appScope) {
                 HttpClient(OkHttp) {
@@ -185,6 +222,12 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
             },
         )
         appScope.launch {
+            combine(sessionManager.cacheMaxBytesFlow, sessionManager.cacheMaxAgeDaysFlow) { cap, days -> cap to days }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect { (cap, days) -> cacheManager.applyPolicy(cap, days) }
+        }
+        appScope.launch {
             PikoMemoryGovernor.Shared.policy.collect(::applyMemoryPolicy)
         }
         appScope.launch {
@@ -196,6 +239,7 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
         }
         val motionScale = PikoMotionScale().apply { followSystemAnimatorScale(this@PikoApplication) }
         appScope.launch { sessionManager.reduceMotionFlow.collect { motionScale.appReduced = it } }
+        appScope.launch { sessionManager.einkModeFlow.collect { motionScale.einkReduced = it } }
         platform = AndroidPikoPlatform(this, { appUpdater }, motionScale)
         val notifier = WorkResultNotifier(this, services, appScope).also { it.start() }
         appScope.launch {
@@ -207,18 +251,18 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
     }
 
     /**
-     * 日志放在私有的 files/logs，导出时另拷一份到缓存目录再分享。debug 包同时进 logcat；
-     * release 包不进，省掉每条一次的 logcat 写入。
-     */
-    /**
      * 要赶在 SDK、图片加载与更新检查建出 OkHttpClient 之前：它们建客户端时取走默认的 ProxySelector。
      * 同步读一次设置，手动代理从第一个请求起就生效；之后改设置经 flow 跟上。
      */
     private fun installProxy() {
-        PikoProxySelector.install(runBlocking { sessionManager.proxySettingFlow.first() })
+        PikoProxySelector.install(sessionManager.currentProxySetting())
         appScope.launch { sessionManager.proxySettingFlow.collect(PikoProxySelector::apply) }
     }
 
+    /**
+     * 日志放在私有的 files/logs，导出时另拷一份到缓存目录再分享；同时接管未捕获异常确保崩溃栈先落盘。
+     * debug 包同时进 logcat；release 包不进，省掉每条一次的 logcat 写入。
+     */
     private fun installLog() {
         val echo: ((LogLevel, String, String, Throwable?) -> Unit)? = if (BuildConfig.DEBUG) {
             { level, tag, message, error ->
@@ -228,22 +272,22 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
                     LogLevel.WARN -> Log.WARN
                     LogLevel.ERROR -> Log.ERROR
                 }
-                Log.println(priority, "Piko/$tag", if (error == null) message else "$message\n${Log.getStackTraceString(error)}")
+                Log.println(priority, "Piko/$tag", if (error == null) message else "$message\n${PikoLog.redact(Log.getStackTraceString(error))}")
             }
         } else {
             null
         }
-        PikoLog.install(File(filesDir, "logs").path, echo)
+        PikoLog.install(File(filesDir, "logs").path, echo = echo)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            PikoLog.e("Crash", "线程 ${thread.name} 未捕获的异常", error)
+            PikoLog.e("Crash", "Uncaught exception on thread ${thread.name}", error)
             // 进程马上就没了，等写入协程把这条落盘；卡住也只等一秒，不耽误系统的崩溃处理
             runBlocking { withTimeoutOrNull(1_000) { PikoLog.flush() } }
             previous?.uncaughtException(thread, error)
         }
         PikoLog.i(
             "App",
-            "启动 ${BuildConfig.VERSION_NAME}（${BuildConfig.VERSION_CODE}），Android ${Build.VERSION.RELEASE}，${Build.MANUFACTURER} ${Build.MODEL}",
+            "App started: Piko ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}), Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}",
         )
     }
 
@@ -264,6 +308,12 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
                     .maxSizeBytes(PikoMemoryGovernor.Shared.policy.value.cacheBudget(imageMemoryCacheMaxBytes))
                     .build()
             }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(File(cacheDir, "piko/image-cache").toOkioPath())
+                    .maxSizeBytes(ANDROID_IMAGE_DISK_CACHE_BYTES)
+                    .build()
+            }
             .components {
                 add(OkHttpNetworkFetcherFactory(callFactory = { okHttpClient }))
             }
@@ -275,6 +325,10 @@ class PikoApplication : Application(), SingletonImageLoader.Factory {
     }
 
     companion object {
+        private const val ANDROID_IMAGE_MIN_MEMORY_BYTES = 24L * 1024L * 1024L
+        private const val ANDROID_IMAGE_MAX_MEMORY_BYTES = 64L * 1024L * 1024L
+        private const val ANDROID_IMAGE_DISK_CACHE_BYTES = 256L * 1024L * 1024L
+
         lateinit var instance: PikoApplication
             private set
     }

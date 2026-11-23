@@ -1,5 +1,6 @@
 package dev.piko.shared.data
 
+import dev.piko.shared.log.PikoLog
 import dev.piko.shared.memory.MemoryWorkKind
 import dev.piko.shared.memory.PikoMemoryGovernor
 import kotlinx.coroutines.CancellationException
@@ -39,6 +40,7 @@ class SnapshotWriter<S>(
         val persisted: Long = -1,
         val failure: Throwable? = null,
         val closing: Boolean = false,
+        val flushWaiters: Int = 0,
     )
 
     private val progress = MutableStateFlow(Progress())
@@ -46,7 +48,11 @@ class SnapshotWriter<S>(
     private val worker = scope.launch {
         try {
             for (ignored in wake) {
-                delay(debounceMillis)
+                if (debounceMillis > 0 && progress.value.flushWaiters == 0) {
+                    kotlinx.coroutines.withTimeoutOrNull(debounceMillis) {
+                        progress.first { it.flushWaiters > 0 || it.closing }
+                    }
+                }
                 while (progress.value.dirty > progress.value.persisted) {
                     try {
                         val permit = governor.acquire(MemoryWorkKind.Persistence, estimatedPeakBytes)
@@ -67,6 +73,11 @@ class SnapshotWriter<S>(
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {
+                        PikoLog.w(
+                            TAG,
+                            "Background snapshot persist failed (generation=$accountGeneration, dirtyRevision=${progress.value.dirty}, persistedRevision=${progress.value.persisted})",
+                            failure,
+                        )
                         update { it.copy(failure = failure) }
                         break
                     }
@@ -75,6 +86,10 @@ class SnapshotWriter<S>(
         } finally {
             wake.close()
         }
+    }
+
+    private companion object {
+        const val TAG = "SnapshotWriter"
     }
 
     init {
@@ -107,11 +122,15 @@ class SnapshotWriter<S>(
         check(worker.isActive) { "Snapshot writer is closed" }
         update {
             check(allowClosing || !it.closing) { "Snapshot writer is closed" }
-            it.copy(dirty = maxOf(it.dirty, version.revision), failure = null)
+            it.copy(dirty = maxOf(it.dirty, version.revision), failure = null, flushWaiters = it.flushWaiters + 1)
         }
-        check(wake.trySend(Unit).isSuccess) { "Snapshot writer is closed" }
-        val result = progress.first { it.persisted >= version.revision || it.failure != null }
-        if (result.persisted < version.revision) throw checkNotNull(result.failure)
+        try {
+            check(wake.trySend(Unit).isSuccess) { "Snapshot writer is closed" }
+            val result = progress.first { it.persisted >= version.revision || it.failure != null }
+            if (result.persisted < version.revision) throw checkNotNull(result.failure)
+        } finally {
+            update { it.copy(flushWaiters = (it.flushWaiters - 1).coerceAtLeast(0)) }
+        }
     }
 
     /** Seal requests, commit the final revision, and release the source even if persistence fails. */

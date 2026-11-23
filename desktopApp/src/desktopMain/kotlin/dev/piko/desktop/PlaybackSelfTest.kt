@@ -37,7 +37,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.openani.mediamp.MediampPlayer
-import org.openani.mediamp.compose.MediampPlayerSurface
+import dev.piko.desktop.ui.player.PikoMpvVideoSurface
+import dev.piko.desktop.ui.player.VideoSurfaceProbe
+import dev.piko.desktop.ui.player.currentMpvVo
 import org.openani.mediamp.mpv.MpvMediampPlayer
 
 /**
@@ -47,8 +49,15 @@ import org.openani.mediamp.mpv.MpvMediampPlayer
  *
  * 两轮播放均越过 [PASS_POSITION_MILLIS] 且关窗清理完成才通过；每轮播放与清理分别限时。
  * [holdMillis] 是第二轮播放达标后窗口再留多久，供外部截图检查画面。
+ * [requireVideo] 默认开启，要求 `current-vo=libmpv`、帧状态推进与非黑像素均达标；
+ * 仅在无硬件 GPU 的虚拟化 macOS CI 宿主（`mediampv` `CGLChoosePixelFormat` 返回 `10002`）上显式关闭。
  */
-internal fun playbackSelfTest(file: File, holdMillis: Long, report: (String) -> Unit): Boolean {
+internal fun playbackSelfTest(
+    file: File,
+    holdMillis: Long,
+    requireVideo: Boolean = true,
+    report: (String) -> Unit,
+): Boolean {
     if (!file.isFile) {
         report("no such file: $file")
         return false
@@ -121,19 +130,26 @@ internal fun playbackSelfTest(file: File, holdMillis: Long, report: (String) -> 
                                     runCatching { stream.close() }
                                     backend.markClosing()
                                     playerJob.cancel()
-                                    runCatching { player.close() }
+                                    runCatching { player.close() }.onFailure {
+                                        dev.piko.shared.log.PikoLog.w("Player", "Failed to close native player during self-test", it)
+                                    }
                                     closedLatch.complete(Unit)
                                 }
                             }
                         }
-                        MediampPlayerSurface(backend.player, Modifier.fillMaxSize().background(Color.Black))
+                        val probe = remember { VideoSurfaceProbe() }
+                        PikoMpvVideoSurface(
+                            player = backend.player,
+                            modifier = Modifier.fillMaxSize().background(Color.Black),
+                            probe = probe,
+                        )
                         LaunchedEffect(backend) {
                             var failure: String? = null
                             val errors = launch(start = CoroutineStart.UNDISPATCHED) {
                                 val error = backend.events.first { it is PlaybackBackendEvent.Error } as PlaybackBackendEvent.Error
                                 failure = error.detail ?: "playback error"
                             }
-                            // open 也算在限时内，覆盖表面未接上渲染上下文时的挂起。
+                            // open、帧输出与非黑像素校验均计入限时，防止 vo=null 空跑谎报通过。
                             val reached = withTimeoutOrNull(TIMEOUT_MILLIS) {
                                 try {
                                     backend.open(PlaybackTarget.Url(stream.url), startMillis = 0L, playWhenReady = true, subtitles = emptyList())
@@ -142,11 +158,29 @@ internal fun playbackSelfTest(file: File, holdMillis: Long, report: (String) -> 
                                 } catch (e: Exception) {
                                     failure = e.toString()
                                 }
-                                while (backend.positionMillis < PASS_POSITION_MILLIS && failure == null) delay(50L)
+                                while (
+                                    failure == null && (
+                                        backend.positionMillis < PASS_POSITION_MILLIS ||
+                                            (
+                                                requireVideo && (
+                                                    probe.distinctStates < MIN_RENDERED_STATES ||
+                                                        !probe.latestNonBlack ||
+                                                        currentMpvVo(backend.player) != "libmpv"
+                                                    )
+                                                )
+                                        )
+                                ) {
+                                    delay(50L)
+                                }
                                 failure == null
                             } ?: false
                             errors.cancel()
-                            report("round=$round position=${backend.positionMillis} duration=${backend.durationMillis} error=$failure")
+                            val vo = currentMpvVo(backend.player)
+                            report(
+                                "round=$round position=${backend.positionMillis} duration=${backend.durationMillis} " +
+                                    "vo=$vo mode=${probe.activeMode} states=${probe.distinctStates} " +
+                                    "nonBlack=${probe.latestNonBlack} requireVideo=$requireVideo error=$failure",
+                            )
                             played[round - 1].complete(reached)
                         }
                     }
@@ -176,4 +210,5 @@ private class LocalFileByteSource(private val file: File) : ProxyByteSource {
 }
 
 private const val PASS_POSITION_MILLIS = 1_200L
+private const val MIN_RENDERED_STATES = 3
 private const val TIMEOUT_MILLIS = 30_000L

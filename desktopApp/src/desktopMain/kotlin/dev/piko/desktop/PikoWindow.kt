@@ -16,6 +16,7 @@ import dev.piko.shared.log.PikoLog
 import kotlinx.coroutines.delay
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.window.FrameWindowScope
 import androidx.compose.ui.window.LocalWindowExceptionHandlerFactory
 import androidx.compose.ui.window.Window
@@ -35,7 +36,10 @@ fun PikoWindow(
     title: String,
     icon: Painter?,
     visible: Boolean = true,
+    windowVisible: Boolean = visible,
     onFatalClose: () -> Unit = onCloseRequest,
+    onPreviewKeyEvent: (KeyEvent) -> Boolean = { false },
+    onKeyEvent: (KeyEvent) -> Boolean = { false },
     content: @Composable FrameWindowScope.() -> Unit,
 ) {
     val currentFatalClose by rememberUpdatedState(onFatalClose)
@@ -53,12 +57,23 @@ fun PikoWindow(
     CompositionLocalProvider(LocalWindowExceptionHandlerFactory provides handlerFactory) {
         // 显卡设备失效或未归属 EDT 异常走全局代次；已知所属窗口的故障仅递增该窗口自己的 windowScope.generation，
         // 避免主窗口异常把正在连播的独立播放器窗口重置回初始集，反之亦然。
-        key(GpuDeviceWatch.generation, desktopWindowFaultCoordinator.generation, windowScope.generation) {
-            Window(onCloseRequest = onCloseRequest, state = state, visible = visible, title = title, icon = icon) {
-                LaunchedEffect(window) {
+        val activeGpuGeneration = GpuDeviceWatch.generation
+        key(activeGpuGeneration, desktopWindowFaultCoordinator.generation, windowScope.generation) {
+            Window(
+                onCloseRequest = onCloseRequest,
+                state = state,
+                visible = visible,
+                title = title,
+                icon = icon,
+                onPreviewKeyEvent = onPreviewKeyEvent,
+                onKeyEvent = onKeyEvent,
+            ) {
+                LaunchedEffect(window, windowVisible, activeGpuGeneration) {
+                    if (!windowVisible) return@LaunchedEffect
                     while (true) {
                         delay(DEVICE_CHECK_INTERVAL_MS)
-                        if (GpuDeviceWatch.checkLost(window)) break
+                        // 仅当 generation 实际递增（过了 3s 防抖触发窗口重建）才退出轮询，避免耗时较长的驱动复位把新窗口留在死画布上
+                        if (GpuDeviceWatch.checkLost(window) && GpuDeviceWatch.generation != activeGpuGeneration) break
                     }
                 }
                 content()
@@ -136,7 +151,7 @@ internal class WindowFaultScope internal constructor(
         } else {
             phase = Phase.CLOSING
             queuedGeneration = -1
-            PikoLog.e("Window", "界面故障无法自动恢复，关闭故障窗口", throwable)
+            PikoLog.e("Window", "Unrecoverable UI fault; closing affected window", throwable)
             coordinator.dispatch {
                 val shouldRun = coordinator.withLock {
                     if (phase == Phase.CLOSED) false
@@ -156,7 +171,7 @@ internal class DesktopWindowFaultCoordinator(
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     internal val dispatch: (() -> Unit) -> Unit = { SwingUtilities.invokeLater(it) },
     internal val log: (Throwable) -> Unit = {
-        PikoLog.e("Window", "界面渲染或事件异常，自动重建窗口恢复出帧", it)
+        PikoLog.e("Window", "UI rendering or event fault; recreating window to recover frame loop", it)
     },
 ) {
     private val handled = ArrayDeque<WeakReference<Throwable>>()

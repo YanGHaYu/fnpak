@@ -7,21 +7,36 @@ import io.github.nihildigit.pikpak.FileStat
 
 /**
  * 空间分布查询：文件夹骨架与物化 `SubtreeStats` 直接取自内存 `State.sortProjection`（零 JSON 解码），
- * SQLite 模式下直接文件与子目录 Top-16 预览文件仅扫描原始数值/文本索引列，彻底避免反序列化数千份 `StoredTreeEntry`。
+ * SQLite 快速路径下直接文件与子目录 Top-24 预览块仅扫描原始数值/文本索引列（无乐观写叠加时），
+ * 有乐观写或内存树回退路径则解码子节点取 Top-16，彻底避免常规浏览反序列化数千份 `StoredTreeEntry`。
  */
 internal fun spaceFolderSnapshot(
     index: DriveTreeIndex,
     folderId: String,
     includeVaulted: Boolean,
     isBuilding: Boolean,
+    projectOptimistic: ((List<FileStat>, String?) -> List<FileStat>)? = null,
 ): SpaceFolderSnapshot = index.withReadState { state ->
+    val entries = if (projectOptimistic == null) {
+        state.entries
+    } else {
+        projectOptimistic(state.entries.values.toList(), null).filter { it.isFolder }.associateBy { it.id }
+    }
+    val childrenByParent = if (projectOptimistic == null) {
+        state.childrenByParent
+    } else {
+        entries.values.groupBy { it.parentId }.mapValues { (_, fs) -> fs.mapTo(HashSet()) { it.id } as Set<String> }
+    }
     val subtreeStats = (state.sortProjection ?: index.sortContext()).subtreeStats
     val chain = ArrayDeque<PikoPathBreadcrumb>()
     val visited = HashSet<String>()
     var ancestorId = folderId
     var excluded = false
     while (ancestorId.isNotEmpty() && visited.add(ancestorId)) {
-        val folder = (state.entries[ancestorId] ?: index.file(ancestorId))?.takeIf { it.isFolder } ?: break
+        val rawFolder = entries[ancestorId] ?: index.file(ancestorId)?.let { f ->
+            if (projectOptimistic != null) projectOptimistic(listOf(f), null).firstOrNull() else f
+        }
+        val folder = rawFolder?.takeIf { it.isFolder } ?: break
         chain.addFirst(PikoPathBreadcrumb(folder.id, folder.name))
         excluded = excluded || folder.trashed || isPikoInternalFolder(folder)
         ancestorId = folder.parentId
@@ -54,14 +69,14 @@ internal fun spaceFolderSnapshot(
         )
     }
 
-    val rawDirectFiles = if (excluded) null else index.directSpaceFiles(folderId, includeVaulted)
+    val rawDirectFiles = if (excluded || projectOptimistic != null) null else index.directSpaceFiles(folderId, includeVaulted)
     val items: List<SpaceNodeItem> = if (excluded) {
         emptyList()
     } else if (rawDirectFiles != null) {
         // SQLite 快速通道：文件夹读内存骨架，直接文件只读原始索引列
-        val combined = ArrayList<SpaceNodeItem>(state.childrenByParent[folderId].orEmpty().size + rawDirectFiles.size)
-        for (childId in state.childrenByParent[folderId].orEmpty()) {
-            val childFolder = state.entries[childId]?.takeIf { it.isFolder } ?: continue
+        val combined = ArrayList<SpaceNodeItem>(childrenByParent[folderId].orEmpty().size + rawDirectFiles.size)
+        for (childId in childrenByParent[folderId].orEmpty()) {
+            val childFolder = entries[childId]?.takeIf { it.isFolder } ?: continue
             folderNodeOf(childFolder)?.let(combined::add)
         }
         for (raw in rawDirectFiles) {
@@ -80,7 +95,7 @@ internal fun spaceFolderSnapshot(
         }
         combined.sortedWith(itemOrder)
     } else {
-        // 内存回退通道（无 SQLite 测试环境）
+        // 乐观写投影或内存回退通道（无 SQLite 测试环境）
         val context = state.sortProjection ?: index.sortContext()
         fun visible(file: FileStat): Boolean = !file.trashed && !isPikoInternalFolder(file) &&
             !VaultStore.looksLikeManifest(file) && !VaultStore.isRecoveryFile(file) &&
@@ -104,24 +119,32 @@ internal fun spaceFolderSnapshot(
                 isComplete = true,
             )
         }
-        index.children(folderId).files.asSequence()
+        val baseChildren = index.children(folderId).files
+        val effectiveChildren = if (projectOptimistic != null) projectOptimistic(baseChildren, folderId) else baseChildren
+        effectiveChildren.asSequence()
             .filter(::visible)
-            .map(::node)
+            .mapNotNull { file -> if (file.isFolder) folderNodeOf(file) else node(file) }
             .sortedWith(itemOrder)
             .toList()
     }
 
     val previewIds = items.asSequence().filter { it.isFolder }.take(24).map { it.id }.toSet()
-    val batchedTopFiles = if (previewIds.isEmpty()) emptyMap() else index.topSpacePreviewFilesByParent(previewIds, includeVaulted, 24)
+    val batchedTopFiles = if (previewIds.isEmpty() || projectOptimistic != null) emptyMap() else index.topSpacePreviewFilesByParent(previewIds, includeVaulted, 24)
     val withPreviews = items.map { item ->
         if (item.id !in previewIds) {
             item
         } else {
-            val fastTopFiles = if (batchedTopFiles != null) batchedTopFiles[item.id].orEmpty() else index.topSpacePreviewFiles(item.id, includeVaulted, 24)
+            val fastTopFiles = if (projectOptimistic != null) {
+                null
+            } else if (batchedTopFiles != null) {
+                batchedTopFiles[item.id].orEmpty()
+            } else {
+                index.topSpacePreviewFiles(item.id, includeVaulted, 24)
+            }
             val previewBlocks = if (fastTopFiles != null) {
-                val candidates = ArrayList<SpacePreviewBlock>(state.childrenByParent[item.id].orEmpty().size + fastTopFiles.size)
-                for (subId in state.childrenByParent[item.id].orEmpty()) {
-                    val subFolder = state.entries[subId]?.takeIf { it.isFolder } ?: continue
+                val candidates = ArrayList<SpacePreviewBlock>(childrenByParent[item.id].orEmpty().size + fastTopFiles.size)
+                for (subId in childrenByParent[item.id].orEmpty()) {
+                    val subFolder = entries[subId]?.takeIf { it.isFolder } ?: continue
                     val subNode = folderNodeOf(subFolder) ?: continue
                     val b = subNode.bytes(includeVaulted)
                     if (b > 0L) {
@@ -140,7 +163,8 @@ internal fun spaceFolderSnapshot(
                 candidates += fastTopFiles
                 candidates.sortedWith(previewOrder).take(24)
             } else {
-                val previewFiles = index.children(item.id).files
+                val rawPreviewFiles = index.children(item.id).files
+                val previewFiles = if (projectOptimistic != null) projectOptimistic(rawPreviewFiles, item.id) else rawPreviewFiles
                 previewFiles.asSequence()
                     .filter { f ->
                         !f.trashed && !isPikoInternalFolder(f) &&

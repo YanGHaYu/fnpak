@@ -19,8 +19,11 @@ import dev.piko.ui.fileWorkChanges
 import dev.piko.ui.workNotices
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 /**
@@ -45,6 +48,7 @@ internal class WorkResultNotifier(
         scope.launch {
             AppVisibility.visible.collect { visible ->
                 if (!visible) {
+                    services.driveWorkspace.flushPersistence()
                     services.downloadManager.flushPersistence()
                     services.uploadManager.flushPersistence()
                 } else {
@@ -66,15 +70,19 @@ internal class WorkResultNotifier(
         scope.launch(Dispatchers.Main) {
             services.workNotices().collect { notice -> if (!AppVisibility.isVisible) post(notice) }
         }
+        @OptIn(ExperimentalCoroutinesApi::class)
         scope.launch(Dispatchers.Main) {
-            // 下载与上传的任务表是 StateFlow，snapshotFlow 看不到它们的变化，另外合进来
+            // 下载与上传的任务表是 StateFlow，snapshotFlow 看不到它们的变化，另外合进来；
+            // 前台可见时不订阅高频任务流，避免每 200~500ms 无谓唤醒主线程，仅在退到后台期间挂载观察。
             val busy = combine(
                 snapshotFlow { services.hasBackgroundWork() },
                 services.downloadManager.tasks,
                 services.uploadManager.tasks,
                 services.fileWorkChanges(),
-            ) { _, _, _, _ -> services.hasBackgroundWork() }
-            combine(AppVisibility.visible, busy) { visible, working -> !visible && working }
+                dev.piko.shared.media.proxy.ExternalPlayerStreams.active,
+            ) { _, _, _, _, _ -> services.hasBackgroundWork() }
+            AppVisibility.visible
+                .flatMapLatest { visible -> if (visible) flowOf(false) else busy }
                 .distinctUntilChanged()
                 .collect { needed -> if (needed) PikoDownloadService.start(app) }
         }

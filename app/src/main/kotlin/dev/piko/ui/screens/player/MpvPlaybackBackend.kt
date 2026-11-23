@@ -13,17 +13,22 @@ import androidx.compose.runtime.setValue
 import dev.jdtech.mpv.MPVLib
 import dev.jdtech.mpv.MPVLib.MpvEvent
 import dev.jdtech.mpv.MPVLib.MpvFormat
+import dev.piko.platform.AndroidSubtitleFonts
 import dev.piko.shared.log.LogLevel
 import dev.piko.shared.log.PikoLog
 import dev.piko.shared.media.player.ExternalSubtitle
-import dev.piko.shared.media.player.MPV_SUBTITLE_LANGUAGES
 import dev.piko.shared.media.player.MediaTrack
+import dev.piko.shared.media.player.PlaybackFeedbackTracker
 import dev.piko.shared.media.player.PlaybackBackend
 import dev.piko.shared.media.player.PlaybackBackendEvent
 import dev.piko.shared.media.player.PlaybackTarget
 import dev.piko.shared.media.player.PlayerAspectRatio
+import dev.piko.shared.media.player.SubtitleFontPreset
+import dev.piko.shared.media.player.SubtitleStylePrefs
 import dev.piko.shared.media.player.VideoCropRegion
 import dev.piko.shared.media.player.mpvSubtitleAddCommands
+import dev.piko.shared.media.player.mpvSubtitleCodepage
+import dev.piko.shared.media.player.mpvSubtitleLanguages
 import dev.piko.shared.media.player.mpvSubtitleSelectCommand
 import dev.piko.shared.media.player.readMpvTracks
 import kotlin.math.ln
@@ -37,6 +42,7 @@ import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 /**
@@ -58,9 +64,14 @@ internal class MpvPlaybackBackend(
     private val headless: Boolean = false,
     /** 设置里的「硬件解码」，见 PikoUserPreferences.hardwareDecodingFlow。 */
     private val hardwareDecoding: Boolean = true,
+    initialSubtitleStyle: SubtitleStylePrefs = SubtitleStylePrefs.DEFAULT,
 ) : PlaybackBackend, MPVLib.EventObserver, MPVLib.LogObserver {
 
     private val mpv: MPVLib = MPVLib.create(context) ?: error(tr("libmpv 初始化失败", "libmpv initialization failed", "libmpvの初期化に失敗しました", "libmpv 초기화 실패", "libmpv 初始化失敗"))
+
+    private val feedback = PlaybackFeedbackTracker()
+    override val playbackGeneration: Long get() = feedback.generation
+    override val bufferSnapshot get() = feedback.snapshot
 
     override var positionMillis by mutableLongStateOf(0L)
         private set
@@ -111,6 +122,7 @@ internal class MpvPlaybackBackend(
     private var surfaceAttached = false
     private var attachedSurface: Surface? = null
     private var videoOutputDisabled = false
+    @Volatile private var audioOnlyMode = false
     private var pendingLoad: Array<String>? = null
     // 以下两个字段只在单线程 mpv-calls 上读写：记录切后台解绑前的视频轨并在新 Surface 尺寸就位后补绘暂停帧
     private var vidBeforeDetach: String = "auto"
@@ -137,6 +149,18 @@ internal class MpvPlaybackBackend(
     @Volatile private var rotateDegrees = 0L
     @Volatile private var rawAspect: Double? = null
 
+    @Volatile private var stopping = false
+    private var transcodeProbeTightened = false
+    @Volatile private var currentSubtitleStyle: SubtitleStylePrefs = initialSubtitleStyle.sanitize()
+    private val hwdecFallback = AndroidHwdecFallbackState(hardwareDecoding)
+    @Volatile private var lastLoadTarget: PlaybackTarget? = null
+    @Volatile private var lastLoadPlayWhenReady: Boolean = true
+    @Volatile private var lastLoadSubtitles: List<ExternalSubtitle> = emptyList()
+    @Volatile private var targetSpeed: Float = 1f
+    private val speedWriteSeq = AtomicLong(0L)
+    @Volatile private var speedAppliedSeq: Long = 0L
+    @Volatile private var speedSettleDeadlineNanos: Long = 0L
+
     init {
         val configDir = MpvConfig.prepare(context)
         // 读取 config-dir 下的 fonts.conf 需要 config=yes；目录里没有 mpv.conf，不会读到别的配置
@@ -145,10 +169,10 @@ internal class MpvPlaybackBackend(
         mpv.setOptionString("vo", if (headless) "null" else VIDEO_OUTPUT)
         mpv.setOptionString("gpu-context", "android")
         mpv.setOptionString("opengl-es", "yes")
-        // 零拷贝的 mediacodec 走 AImageReader 与 vo=gpu 互通；不支持的编码（wmv3、rv40 等）
-        // 自动落回软解，这正是换 mpv 的目的
-        mpv.setOptionString("hwdec", if (hardwareDecoding) "mediacodec,mediacodec-copy" else "no")
-        mpv.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
+        // 零拷贝的 mediacodec 走 AImageReader 与 vo=gpu 互通；老旧 AVI/MPEG-4 等编码自动走软解，
+        // H.264/HEVC/VP8/VP9/AV1 保持硬件解码，运行期 MediaCodec 异常时亦会自动回退软解
+        mpv.setOptionString("hwdec", if (hardwareDecoding) ANDROID_HWDEC_VALUE else "no")
+        mpv.setOptionString("hwdec-codecs", ANDROID_HWDEC_CODECS)
         mpv.setOptionString("ao", "audiotrack,opensles")
         mpv.setOptionString("idle", "yes")
         mpv.setOptionString("keep-open", "yes")
@@ -160,14 +184,23 @@ internal class MpvPlaybackBackend(
         mpv.setOptionString("input-vo-keyboard", "no")
         mpv.setOptionString("save-position-on-quit", "no")
         mpv.setOptionString("sub-font-provider", "fontconfig")
-        mpv.setOptionString("slang", MPV_SUBTITLE_LANGUAGES)
+        mpv.setOptionString("slang", mpvSubtitleLanguages())
+        mpv.setOptionString("sub-codepage", mpvSubtitleCodepage())
         // 纯文本字幕（SRT/VTT）默认 sub-scale-with-window=yes 会按整个 SurfaceView 窗口高度缩放：
         // 手机竖屏（如 1080x2400）播放 16:9 视频（1080x607）时字号会被窗口高度放大近 4 倍并掉进底部黑边；
-        // 统一改为按实际视频画面尺寸缩放、贴合画面下沿，并将基准字号对齐现代 mpv 0.38+ 的 38（720p 基准）
+        // 统一改为按实际视频画面尺寸缩放、贴合画面下沿，并同步应用用户保存的字幕样式
         mpv.setOptionString("sub-scale-with-window", "no")
         mpv.setOptionString("sub-use-margins", "no")
-        mpv.setOptionString("sub-font-size", "38")
-        mpv.setOptionString("sub-border-size", "2")
+        if (!preview) {
+            // init runs synchronously on the Android main thread during composition; avoid blocking disk font scans
+            // here and let the follow-up LaunchedEffect -> setSubtitleStyle() on the mpv worker thread resolve Custom fonts.
+            currentSubtitleStyle.toMpvProperties(
+                platformDefaultFont = ANDROID_DEFAULT_SUBTITLE_FONT,
+                resolveFontFamily = { resolveAndroidSubtitleFont(it, allowDiskScan = false) },
+            ).forEach { (key, value) ->
+                mpv.setOptionString(key, value)
+            }
+        }
         mpv.setOptionString("network-timeout", "30")
         // 仅向 JNI 与 logcat 输出警告及错误，阻断 C 层每秒上千条 verbose 字符串跨界回调拖慢主线程与 GC
         mpv.setOptionString("msg-level", "all=warn")
@@ -210,6 +243,7 @@ internal class MpvPlaybackBackend(
             mpv.observeProperty("time-pos", MpvFormat.MPV_FORMAT_DOUBLE)
             mpv.observeProperty("duration", MpvFormat.MPV_FORMAT_DOUBLE)
             mpv.observeProperty("demuxer-cache-time", MpvFormat.MPV_FORMAT_DOUBLE)
+            mpv.observeProperty("demuxer-cache-duration", MpvFormat.MPV_FORMAT_DOUBLE)
             mpv.observeProperty("pause", MpvFormat.MPV_FORMAT_FLAG)
             mpv.observeProperty("paused-for-cache", MpvFormat.MPV_FORMAT_FLAG)
             mpv.observeProperty("eof-reached", MpvFormat.MPV_FORMAT_FLAG)
@@ -232,22 +266,60 @@ internal class MpvPlaybackBackend(
         subtitles: List<ExternalSubtitle>,
     ) {
         if (released) return
+        feedback.invalidate()
         fileLoaded = false
-        // 段落预览关着音轨与字幕，挂了也不显示
+        // 段落预览与信息流片段仅关闭字幕轨（sid=no，音轨仍保留），无需挂载外挂字幕
         pendingSubtitles = if (preview) emptyList() else subtitles
-        val uri = when (target) {
-            is PlaybackTarget.LocalFile -> localUri(target.path) ?: return
+        val rawTargetLocator = when (target) {
+            is PlaybackTarget.LocalFile -> target.path
             is PlaybackTarget.Url -> target.url
         }
+        val targetHwdec = hwdecFallback.onOpen(rawTargetLocator)
+        if (hardwareDecoding && hwdecFallback.proactiveReason != null) {
+            PikoLog.i("Player", "Auto software decode enabled for legacy stream (reason=${hwdecFallback.proactiveReason})")
+        }
+        val uri = when (target) {
+            is PlaybackTarget.LocalFile -> localUri(target.path) ?: run {
+                isLoadingFile = false
+                _events.tryEmit(PlaybackBackendEvent.Error("Failed to open local content URI descriptor"))
+                return
+            }
+            is PlaybackTarget.Url -> target.url
+        }
+        lastLoadTarget = target
+        lastLoadPlayWhenReady = playWhenReady
+        lastLoadSubtitles = pendingSubtitles
         observePropertiesOnce()
         val start = String.format(Locale.US, "%.3f", startMillis.coerceAtLeast(0L) / 1000.0)
-        onMpv { mpv.setPropertyBoolean("pause", !playWhenReady) }
+        stopping = false
+        val isMpegTsTranscode = target is PlaybackTarget.Url && target.isMpegTsTranscode
+        val slang = mpvSubtitleLanguages()
+        val subCodepage = mpvSubtitleCodepage()
+        onMpv {
+            mpv.setPropertyString("hwdec", targetHwdec)
+            if (!preview) {
+                mpv.setPropertyString("slang", slang)
+                mpv.setPropertyString("sub-codepage", subCodepage)
+                if (isMpegTsTranscode) {
+                    mpv.setPropertyString("demuxer-lavf-probesize", "$MPEGTS_TRANSCODE_PROBE_BYTES")
+                    mpv.setPropertyString("demuxer-lavf-analyzeduration", "$MPEGTS_TRANSCODE_ANALYZE_SECONDS")
+                    transcodeProbeTightened = true
+                } else if (transcodeProbeTightened) {
+                    mpv.setPropertyString("demuxer-lavf-probesize", "$DEFAULT_LAVF_PROBE_BYTES")
+                    mpv.setPropertyString("demuxer-lavf-analyzeduration", "0")
+                    transcodeProbeTightened = false
+                }
+            }
+            mpv.setPropertyBoolean("pause", !playWhenReady)
+        }
         positionMillis = startMillis.coerceAtLeast(0L)
         durationMillis = 0L
         bufferedPositionMillis = 0L
-        // mpv 0.38 起 loadfile 的第三个参数是插入位置，逐文件选项放在第四个
+        // mpv 0.38 起 loadfile 的第三个参数是插入位置，逐文件选项放在第四个；
+        // hwdec 值含逗号（mediacodec,mediacodec-copy），已在上方经 setPropertyString 原样写入，
+        // 避免放入 loadfile 逗号分隔选项串触发 mpv 选项解析报错。
         val command = arrayOf("loadfile", uri, "replace", "-1", "start=$start")
-        if (surfaceAttached || headless) {
+        if (surfaceAttached || headless || audioOnlyMode) {
             issueLoad(command)
         } else {
             // 没有 Surface 时 vo 初始化失败，mpv 会把视频轨整条关掉只放声音，得等画面挂上
@@ -257,31 +329,66 @@ internal class MpvPlaybackBackend(
     }
 
     /**
+     * 纯音频文件或「听视频」模式不挂载 SurfaceView：显式关闭视频输出（`vid=no`、`vo=null`）并允许直接加载/切曲，
+     * 待切回视频界面挂载 Surface 时再由 [attachSurface] 恢复视频输出。
+     */
+    fun setAudioOnlyMode(audioOnly: Boolean) {
+        if (released || audioOnlyMode == audioOnly) return
+        audioOnlyMode = audioOnly
+        if (audioOnly && !surfaceAttached) {
+            videoOutputDisabled = true
+            onMpv {
+                mpv.setPropertyString("vid", "no")
+                mpv.setPropertyString("vo", "null")
+                mpv.setOptionString("force-window", "no")
+            }
+            pendingLoad?.let {
+                pendingLoad = null
+                issueLoad(it)
+            }
+        }
+    }
+
+    /**
      * SAF 目录里的文件是 content: URI，mpv 读不了。按 mpv-android 的做法由 ContentResolver
      * 打开描述符交给 mpv，fdclose:// 表示描述符归 mpv，播完由它关闭。打不开时返回 null。
      */
     private fun localUri(path: String): String? {
         if (!path.startsWith("content:")) return path
-        val descriptor = runCatching { context.contentResolver.openFileDescriptor(Uri.parse(path), "r") }.getOrNull()
-            ?: return null
+        val parsed = Uri.parse(path)
+        val descriptor = runCatching { context.contentResolver.openFileDescriptor(parsed, "r") }
+            .onFailure { e ->
+                PikoLog.w("Player", "Failed to open local content URI descriptor (authority=${parsed.authority})", e)
+            }
+            .getOrElse { return null }
+        if (descriptor == null) {
+            PikoLog.w("Player", "ContentResolver returned null descriptor for local content URI (authority=${parsed.authority})")
+            return null
+        }
         return "fdclose://${descriptor.detachFd()}"
     }
 
     override fun stop() {
         if (released) return
+        stopping = true
+        feedback.invalidate()
         pendingLoad = null
         supersededLoads = issuedLoads
         onMpv { mpv.command(arrayOf("stop")) }
         isLoadingFile = false
     }
 
+    override suspend fun beginStop() = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+        stop()
+    }
+
     override val requiresAsyncStopDrain: Boolean get() = true
 
-    private suspend fun <T> callOnMpv(block: () -> T?): T? {
-        if (released) return null
-        val done = CompletableDeferred<T?>()
+    private suspend fun <T> callOnMpv(block: () -> T?): Result<T?> {
+        if (released) return Result.success(null)
+        val done = CompletableDeferred<Result<T?>>()
         calls.execute {
-            val result = if (destroyed) null else runCatching(block).getOrNull()
+            val result = if (destroyed) Result.success(null) else runCatching(block)
             done.complete(result)
         }
         return done.await()
@@ -292,17 +399,36 @@ internal class MpvPlaybackBackend(
             destroyCompleted.await()
             return
         }
+        feedback.invalidate()
         pendingLoad = null
         supersededLoads = issuedLoads
         isLoadingFile = false
         callOnMpv { mpv.command(arrayOf("stop")) }
-        repeat(16) {
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(STOP_IDLE_TIMEOUT_MILLIS)
+        while (true) {
             if (released) {
                 destroyCompleted.await()
                 return
             }
-            val idle = callOnMpv { mpv.getPropertyString("idle-active") }
-            if (idle == null || idle == "yes") return
+            val idleResult = callOnMpv { mpv.getPropertyString("idle-active") }
+            if (destroyed) return
+            val error = idleResult.exceptionOrNull()
+            if (error != null) {
+                PikoLog.w("Player", "Failed to query mpv idle-active while stopping", error)
+                return
+            }
+            val idle = idleResult.getOrNull()
+            if (idle == "yes") return
+            if (idle == null) {
+                if (!released && !destroyed) {
+                    PikoLog.w("Player", "mpv idle-active returned null while stopping; aborting idle wait")
+                }
+                return
+            }
+            if (System.nanoTime() >= deadlineNanos) {
+                PikoLog.w("Player", "Timed out waiting for mpv idle-active after ${STOP_IDLE_TIMEOUT_MILLIS}ms (last=$idle)")
+                return
+            }
             delay(15L)
         }
     }
@@ -317,13 +443,25 @@ internal class MpvPlaybackBackend(
 
     override fun seekTo(positionMillis: Long) {
         if (released) return
+        feedback.invalidate()
+        isSeeking = true
         val seconds = String.format(Locale.US, "%.3f", positionMillis.coerceAtLeast(0L) / 1000.0)
         this.positionMillis = positionMillis.coerceAtLeast(0L)
         onMpv { mpv.command(arrayOf("seek", seconds, "absolute")) }
     }
 
     override fun setSpeed(speed: Float) {
-        onMpv { mpv.setPropertyDouble("speed", speed.toDouble()) }
+        if (released) return
+        val clamped = speed.coerceAtLeast(0.1f)
+        targetSpeed = clamped
+        currentSpeed = clamped
+        val seq = speedWriteSeq.incrementAndGet()
+        speedSettleDeadlineNanos = System.nanoTime() + SPEED_SETTLE_NANOS
+        onMpv {
+            mpv.setPropertyDouble("speed", clamped.toDouble())
+            speedAppliedSeq = seq
+            speedSettleDeadlineNanos = System.nanoTime() + SPEED_SETTLE_NANOS
+        }
     }
 
     override fun setAspectRatio(mode: PlayerAspectRatio) {
@@ -395,7 +533,7 @@ internal class MpvPlaybackBackend(
     }
 
     fun bufferReport(): String? =
-        if (released) null else "cache-secs=${mpv.getPropertyString("cache-secs")}，缓存 ${mpv.getPropertyString("demuxer-cache-duration")} 秒"
+        if (released) null else "cache-secs=${mpv.getPropertyString("cache-secs")}, cached=${mpv.getPropertyString("demuxer-cache-duration")}s"
 
     override fun selectAudioTrack(id: String) {
         onMpv { mpv.setPropertyString("aid", id) }
@@ -415,6 +553,29 @@ internal class MpvPlaybackBackend(
             return
         }
         onMpv { mpv.command(mpvSubtitleSelectCommand(subtitle)) }
+    }
+
+    override fun setSubtitleStyle(style: SubtitleStylePrefs) {
+        if (released || preview) return
+        val sanitized = style.sanitize()
+        currentSubtitleStyle = sanitized
+        onMpv {
+            sanitized.toMpvProperties(
+                platformDefaultFont = ANDROID_DEFAULT_SUBTITLE_FONT,
+                resolveFontFamily = { resolveAndroidSubtitleFont(it, allowDiskScan = true) },
+            ).forEach { (key, value) ->
+                runCatching { mpv.setPropertyString(key, value) }
+            }
+        }
+    }
+
+    private fun resolveAndroidSubtitleFont(style: SubtitleStylePrefs, allowDiskScan: Boolean): String = when (style.fontPreset) {
+        SubtitleFontPreset.Default -> ANDROID_DEFAULT_SUBTITLE_FONT
+        SubtitleFontPreset.Serif -> "serif"
+        SubtitleFontPreset.Monospace -> "monospace"
+        SubtitleFontPreset.Custom -> style.customFontFamily
+            ?.let { if (allowDiskScan) AndroidSubtitleFonts.findInstalledFamily(it) else AndroidSubtitleFonts.findCachedFamily(it) }
+            ?: ANDROID_DEFAULT_SUBTITLE_FONT
     }
 
     override val supportsRotation: Boolean = true
@@ -456,9 +617,7 @@ internal class MpvPlaybackBackend(
             mpv.setOptionString("force-window", "yes")
             if (restoreVideoOutput && !headless) {
                 mpv.setPropertyString("vo", VIDEO_OUTPUT)
-                if (hardwareDecoding) {
-                    mpv.setPropertyString("hwdec", "mediacodec,mediacodec-copy")
-                }
+                mpv.setPropertyString("hwdec", hwdecFallback.effectiveHwdec())
                 val targetVid = vidBeforeDetach.ifBlank { "auto" }
                 mpv.setPropertyString("vid", targetVid)
                 needsPausedRedrawOnResize = true
@@ -602,6 +761,7 @@ internal class MpvPlaybackBackend(
         issuedLoads += 1
         readySent = false
         lastErrorLog = null
+        synchronized(recentMpvLines) { recentMpvLines.clear() }
         isLoadingFile = true
         val hasSurfaceNow = surfaceAttached || headless
         onMpv {
@@ -610,6 +770,10 @@ internal class MpvPlaybackBackend(
             if (hasSurfaceNow && !videoOutputDisabled) {
                 val curVid = mpv.getPropertyString("vid")
                 if (curVid == "no") mpv.setPropertyString("vid", "auto")
+            } else if (!hasSurfaceNow) {
+                mpv.setPropertyString("vid", "no")
+                mpv.setPropertyString("vo", "null")
+                mpv.setOptionString("force-window", "no")
             }
             mpv.command(command)
         }
@@ -618,6 +782,7 @@ internal class MpvPlaybackBackend(
     override fun eventProperty(property: String) {
         // 属性暂不可用（空闲、换片途中）
         when (property) {
+            "demuxer-cache-duration" -> feedback.sample(playbackGeneration, null, speed)
             "duration" -> durationMillis = 0L
             "demuxer-cache-time" -> bufferedPositionMillis = 0L
             "video-params/aspect" -> {
@@ -646,6 +811,7 @@ internal class MpvPlaybackBackend(
                 if (abs(millis - positionMillis) >= POSITION_GRANULARITY_MILLIS) positionMillis = millis
             }
 
+            "demuxer-cache-duration" -> feedback.sample(playbackGeneration, value, speed)
             "duration" -> durationMillis = (value * 1000).toLong().coerceAtLeast(0L)
             "demuxer-cache-time" -> {
                 val millis = (value * 1000).toLong().coerceAtLeast(0L)
@@ -653,7 +819,14 @@ internal class MpvPlaybackBackend(
                     bufferedPositionMillis = millis
                 }
             }
-            "speed" -> currentSpeed = value.toFloat()
+            "speed" -> {
+                val observed = value.toFloat()
+                val stillPending = speedAppliedSeq < speedWriteSeq.get()
+                val inSettleWindow = System.nanoTime() < speedSettleDeadlineNanos
+                if ((!stillPending && !inSettleWindow) || abs(observed - targetSpeed) <= 0.005f) {
+                    currentSpeed = observed
+                }
+            }
             "volume" -> currentVolume = (value / 100).toFloat().coerceIn(0f, 1f)
             "video-params/aspect" -> {
                 rawAspect = value
@@ -687,11 +860,11 @@ internal class MpvPlaybackBackend(
         lastLoggedDecoderKey = key
         if (!loggedAudioOutput) {
             loggedAudioOutput = true
-            PikoLog.d("Player", "mpv 音频输出：${mpv.getPropertyString("current-ao")}，硬解：$hwdec")
+            PikoLog.d("Player", "mpv audio output: ${mpv.getPropertyString("current-ao").orEmpty().ifEmpty { "none" }}, hwdec: $hwdec")
         }
-        val summary = "mpv 解码状态（preview=$preview, load=#$issuedLoads, surface=#$surfaceGeneration, $trigger）：" +
-            "codec=${codec.ifEmpty { "unknown" }}, ${w}x$h, vo=${vo.ifEmpty { "none" }}, 硬解：$hwdec"
-        if (hardwareDecoding && !headless && (hwdec == "no" || hwdec == "none") && codec.isNotEmpty()) {
+        val summary = "mpv decoder state (preview=$preview, load=#$issuedLoads, surface=#$surfaceGeneration, trigger=$trigger): " +
+            "codec=${codec.ifEmpty { "unknown" }}, ${w}x$h, vo=${vo.ifEmpty { "none" }}, hwdec=$hwdec"
+        if (hardwareDecoding && !hwdecFallback.forcedSoftwareForCurrentFile && !headless && (hwdec == "no" || hwdec == "none") && codec.isNotEmpty()) {
             PikoLog.w("Player", summary)
         } else {
             PikoLog.d("Player", summary)
@@ -704,10 +877,20 @@ internal class MpvPlaybackBackend(
             MpvEvent.MPV_EVENT_START_FILE -> isLoadingFile = true
             MpvEvent.MPV_EVENT_FILE_LOADED -> {
                 fileLoaded = true
+                hwdecFallback.onFileLoaded()
+                val codec = runCatching { mpv.getPropertyString("video-codec") }.getOrNull()
+                val activeHwdec = runCatching { mpv.getPropertyString("hwdec-current") }.getOrNull()
+                if (hwdecFallback.shouldSwitchToSoftwareOnCodecLoaded(codec, activeHwdec)) {
+                    PikoLog.i("Player", "Auto-switching legacy codec (${codec ?: "unknown"}) from $activeHwdec to software decode (hwdec=no)")
+                    onMpv { mpv.setPropertyString("hwdec", "no") }
+                }
                 attachPendingSubtitles()
             }
             MpvEvent.MPV_EVENT_SEEK -> isSeeking = true
             MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
+                hwdecFallback.onPlaybackReady()
+                feedback.restarted(playbackGeneration)
+                feedback.sample(playbackGeneration, mpv.getPropertyDouble("demuxer-cache-duration"), speed)
                 isLoadingFile = false
                 isSeeking = false
                 if (!readySent) {
@@ -720,6 +903,30 @@ internal class MpvPlaybackBackend(
             MpvEvent.MPV_EVENT_END_FILE -> {
                 receivedEnds += 1
                 if (receivedEnds > supersededLoads) {
+                    val retryTarget = lastLoadTarget
+                    if (!stopping && !released && retryTarget != null &&
+                        hwdecFallback.shouldRetryWithSoftwareOnEndFileError(headless = headless, audioOnly = audioOnlyMode)
+                    ) {
+                        // SAF content:// 本地文件必须通过 ContentResolver 重新打开全新 detached FD，严禁复用已由 fdclose:// 关闭的旧 FD
+                        val retryUri = when (retryTarget) {
+                            is PlaybackTarget.LocalFile -> localUri(retryTarget.path)
+                            is PlaybackTarget.Url -> retryTarget.url
+                        }
+                        if (retryUri != null) {
+                            val resumeSeconds = String.format(Locale.US, "%.3f", positionMillis.coerceAtLeast(0L) / 1000.0)
+                            PikoLog.w(
+                                "Player",
+                                "Hardware decode failed; retrying stream with software decode (hwdec=no, start=${resumeSeconds}s, detail=${lastErrorLog ?: "none"})",
+                            )
+                            pendingSubtitles = if (preview) emptyList() else lastLoadSubtitles
+                            onMpv {
+                                mpv.setPropertyString("hwdec", "no")
+                                mpv.setPropertyBoolean("pause", !lastLoadPlayWhenReady)
+                            }
+                            issueLoad(arrayOf("loadfile", retryUri, "replace", "-1", "start=$resumeSeconds"))
+                            return
+                        }
+                    }
                     isLoadingFile = false
                     isSeeking = false
                     _events.tryEmit(PlaybackBackendEvent.Error(lastErrorLog))
@@ -729,21 +936,35 @@ internal class MpvPlaybackBackend(
     }
 
     override fun logMessage(prefix: String, level: Int, text: String) {
+        if ((stopping || released) && prefix.startsWith("ffmpeg")) return
+        hwdecFallback.onLogMessage(prefix, level <= MPV_LOG_LEVEL_WARN, text)
         // 回调里是 v 级别的全量日志，只留错误作为失败原因
         if (level <= MPV_LOG_LEVEL_ERROR) lastErrorLog = "$prefix: ${text.trim()}"
         // 警告以上进应用日志。坏流会逐包刷同几句，最近记过的不再记，免得挤掉日志里别的内容。
         // 只比上一句不够：从切片开头解到第一个关键帧前，HEVC 解码器每个包交替报「PPS id out of range」
         // 与「Skipping invalid undecodable NALU」，一段就是几百行
         if (level <= MPV_LOG_LEVEL_WARN) {
-            val line = "$prefix: ${text.trim()}"
-            if (recentMpvLines.add(line)) {
-                if (recentMpvLines.size > RECENT_MPV_LINES) recentMpvLines.remove(recentMpvLines.first())
-                PikoLog.log(if (level <= MPV_LOG_LEVEL_ERROR) LogLevel.ERROR else LogLevel.WARN, "mpv", line, null)
+            val trimmed = text.trim()
+            val line = "$prefix: $trimmed"
+            val dedupKey = if (prefix.startsWith("ffmpeg")) {
+                "$prefix: ${FFMPEG_NUMBER_PATTERN.replace(trimmed, "#")}"
+            } else {
+                line
+            }
+            val shouldLog = synchronized(recentMpvLines) {
+                val added = recentMpvLines.add(dedupKey)
+                if (added && recentMpvLines.size > RECENT_MPV_LINES) {
+                    recentMpvLines.remove(recentMpvLines.first())
+                }
+                added
+            }
+            if (shouldLog) {
+                PikoLog.log(if (level <= MPV_LOG_LEVEL_ERROR) LogLevel.ERROR else LogLevel.WARN, "Mpv", line, null)
             }
         }
     }
 
-    // 只在 mpv 的日志线程上读写。按加入先后排，满了挤掉最早的
+    // mpv 日志线程与切集线程均会访问，经 synchronized(recentMpvLines) 串行化；换片时清空，避免前一部视频的重复报错压掉后一部视频的首条报错
     private val recentMpvLines = LinkedHashSet<String>()
 
     private fun updateVideoAspect() {
@@ -762,9 +983,18 @@ internal class MpvPlaybackBackend(
 
         const val MIB = 1024 * 1024
         const val CALL_THREAD_IDLE_SECONDS = 5L
+        const val STOP_IDLE_TIMEOUT_MILLIS = 2_000L
         const val PREVIEW_PROBE_BYTES = 1024 * 1024
         const val PREVIEW_ANALYZE_SECONDS = 1
+        const val DEFAULT_LAVF_PROBE_BYTES = 5_000_000
+        // 1080P HEVC MPEG-TS 转码流单个 GOP 常为 2–5 秒；512 KiB / 1s 过紧会导致 avformat_find_stream_info
+        // 漏采 VPS/SPS/PPS 与首个 IDR，引发中途拖动 seek 反复报错 PPS id out of range 并停顿 7s+。
+        // 放宽至 2 MiB / 3s（仍较 FFmpeg 默认 5 MiB / 5s 削减 60%），同时不影响原画 MKV/MP4 起播。
+        const val MPEGTS_TRANSCODE_PROBE_BYTES = 2 * MIB
+        const val MPEGTS_TRANSCODE_ANALYZE_SECONDS = 3
+        const val ANDROID_DEFAULT_SUBTITLE_FONT = "sans-serif"
         const val POSITION_GRANULARITY_MILLIS = 250L
+        val FFMPEG_NUMBER_PATTERN = Regex("-?[0-9]+")
 
         // mpv_log_level 的 MPV_LOG_LEVEL_ERROR。1.0.0 的构件没带 MpvLogLevel 常量类
         const val MPV_LOG_LEVEL_ERROR = 20
@@ -772,6 +1002,7 @@ internal class MpvPlaybackBackend(
 
         // 够盖住一组交替刷的句子，又不至于把隔了很久再出现的同一个问题也吞掉
         const val RECENT_MPV_LINES = 16
+        const val SPEED_SETTLE_NANOS = 400_000_000L
     }
 }
 
@@ -784,13 +1015,21 @@ internal class MpvPlaybackBackend(
  * Noto Sans CJK 覆盖，不必在 APK 里再塞一套几十 MB 的字体。
  */
 internal object MpvConfig {
+    @Volatile
+    private var preparedDir: File? = null
+
     fun prepare(context: Context): File {
-        val dir = File(context.filesDir, "mpv").apply { mkdirs() }
-        val cacheDir = File(context.cacheDir, "fontconfig").apply { mkdirs() }
-        val fontsConf = File(dir, "fonts.conf")
-        val content = fontsConfig(cacheDir)
-        if (!fontsConf.exists() || fontsConf.readText() != content) fontsConf.writeText(content)
-        return dir
+        preparedDir?.let { return it }
+        return synchronized(this) {
+            preparedDir?.let { return@synchronized it }
+            val appContext = context.applicationContext ?: context
+            val dir = File(appContext.filesDir, "mpv").apply { mkdirs() }
+            val cacheDir = File(appContext.cacheDir, "fontconfig").apply { mkdirs() }
+            val fontsConf = File(dir, "fonts.conf")
+            val content = fontsConfig(cacheDir)
+            if (!fontsConf.exists() || fontsConf.readText() != content) fontsConf.writeText(content)
+            dir.also { preparedDir = it }
+        }
     }
 
     private fun fontsConfig(cacheDir: File) = """
@@ -805,7 +1044,38 @@ internal object MpvConfig {
             <prefer>
               <family>Roboto</family>
               <family>Noto Sans CJK SC</family>
+              <family>Noto Sans CJK TC</family>
+              <family>Noto Sans CJK JP</family>
+              <family>Noto Sans CJK KR</family>
               <family>Noto Sans SC</family>
+              <family>Noto Sans TC</family>
+              <family>Droid Sans Fallback</family>
+            </prefer>
+          </alias>
+          <alias>
+            <family>serif</family>
+            <prefer>
+              <family>Noto Serif</family>
+              <family>Noto Serif CJK SC</family>
+              <family>Noto Serif CJK TC</family>
+              <family>Noto Serif CJK JP</family>
+              <family>Noto Serif CJK KR</family>
+              <family>Noto Serif SC</family>
+              <family>Noto Serif TC</family>
+              <family>Droid Serif</family>
+              <family>Noto Sans CJK SC</family>
+              <family>Droid Sans Fallback</family>
+            </prefer>
+          </alias>
+          <alias>
+            <family>monospace</family>
+            <prefer>
+              <family>Droid Sans Mono</family>
+              <family>Roboto Mono</family>
+              <family>Noto Sans Mono CJK SC</family>
+              <family>Noto Sans Mono CJK TC</family>
+              <family>Cutive Mono</family>
+              <family>Noto Sans CJK SC</family>
               <family>Droid Sans Fallback</family>
             </prefer>
           </alias>

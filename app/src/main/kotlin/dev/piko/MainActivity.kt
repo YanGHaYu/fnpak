@@ -3,6 +3,7 @@ package dev.piko
 import java.util.Locale
 import dev.piko.shared.i18n.PikoLocale
 import dev.piko.shared.i18n.tr
+import dev.piko.shared.log.PikoLog
 import dev.piko.data.auth.AppLanguage
 
 import android.Manifest
@@ -48,16 +49,26 @@ import dev.piko.ui.hasBackgroundWork
 import dev.piko.ui.fileWorkChanges
 import dev.piko.ui.VideoPlayerHost
 import dev.piko.ui.screens.player.MediampVideoPlayerScreen
+import dev.piko.ui.theme.Appearance
+import dev.piko.ui.theme.SeedTheme
+import dev.piko.ui.theme.ThemeMode
 import dev.piko.ui.theme.appearanceFlow
 import dev.piko.ui.theme.isDark
 import dev.piko.platform.installMotionScale
 import dev.piko.util.PikPakAppLink
+import java.io.InputStream
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * Main application entry activity using Single Activity architecture.
@@ -70,11 +81,13 @@ import kotlinx.coroutines.withContext
  */
 class MainActivity : ComponentActivity() {
 
+    private var openTorrentJob: Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         val systemLocale = android.content.res.Resources.getSystem().configuration.locales.get(0) ?: Locale.getDefault()
         PikoLocale.bindSystemLocale(systemLocale.toLanguageTag())
         super.onCreate(savedInstanceState)
-        val initialLanguage = runBlocking { PikoApplication.instance.sessionManager.appLanguageFlow.first() }
+        val initialLanguage = PikoApplication.instance.sessionManager.currentAppLanguage()
         applyLanguage(PikoLocale.resolve(initialLanguage))
         PikoLocale.apply(initialLanguage)
         enableEdgeToEdge()
@@ -84,8 +97,16 @@ class MainActivity : ComponentActivity() {
 
         val app = PikoApplication.instance
         val appearanceFlow = app.sessionManager.appearanceFlow(app.platform.supportsDynamicColor)
-        // 同步读一次再 setContent：异步给初值的话，首帧按系统取色画出来，随即跳成用户选的主题
-        val initialAppearance = runBlocking { appearanceFlow.first() }
+        // 从预加载的无锁偏好快照同步构造初始外观，既避免主线程 runBlocking 又避免首帧闪回默认主题
+        val initialSnapshot = app.sessionManager.currentSnapshot
+        val initialAppearance = Appearance(
+            mode = ThemeMode.entries.find { it.name.equals(initialSnapshot.themeMode, ignoreCase = true) } ?: ThemeMode.SYSTEM,
+            seed = SeedTheme.colorEntries.find { it.name == initialSnapshot.themeSeed },
+            dynamicColorAvailable = app.platform.supportsDynamicColor,
+            pureBlack = initialSnapshot.pureBlack,
+            einkMode = initialSnapshot.einkMode,
+            motionPreference = initialSnapshot.motionPreference,
+        )
         // 播放器仍在 app 模块，以应用内覆盖层的方式交给共享主界面
         val videoPlayer = VideoPlayerHost.InApp { screen, onClose ->
             MediampVideoPlayerScreen(
@@ -178,20 +199,62 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun isOwnFileProviderUri(uri: Uri): Boolean =
+        uri.authority.equals("${packageName}.fileprovider", ignoreCase = true)
+
     /** 打开的 .torrent 文件。按类型认而不按扩展名：content: URI 的路径多半不带文件名。 */
     private fun torrentUri(intent: Intent): Uri? {
         if (intent.action != Intent.ACTION_VIEW) return null
-        val uri = intent.data?.takeIf { it.scheme == ContentResolver.SCHEME_CONTENT } ?: return null
-        return uri.takeIf { (intent.type ?: contentResolver.getType(uri)) == TORRENT_MIME_TYPE }
+        val uri = intent.data?.takeIf { it.scheme == ContentResolver.SCHEME_CONTENT && !isOwnFileProviderUri(it) } ?: return null
+        val mimeType = intent.type ?: runCatching { contentResolver.getType(uri) }
+            .onFailure { PikoLog.w("IncomingLink", "Failed to query MIME type for incoming URI (authority=${uri.authority})", it) }
+            .getOrNull()
+        return uri.takeIf { mimeType == TORRENT_MIME_TYPE }
     }
 
     /** 与桌面端拖进种子相同，在本地换算成磁力链接。读取放在后台：文档提供者可能现从网络取内容。 */
     private fun openTorrent(uri: Uri) {
         val app = PikoApplication.instance
-        app.appScope.launch(Dispatchers.IO) {
-            val magnet = runCatching { app.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
-                .getOrNull()
-                ?.let(TorrentMagnet::fromBytes)
+        openTorrentJob?.cancel()
+        openTorrentJob = app.appScope.launch {
+            val magnet = try {
+                withTimeout(TORRENT_READ_TIMEOUT_MS) {
+                    val streamRef = AtomicReference<InputStream?>(null)
+                    val readJob = async(Dispatchers.IO) {
+                        runInterruptible {
+                            app.contentResolver.openInputStream(uri)?.use { stream ->
+                                streamRef.set(stream)
+                                TorrentMagnet.readBoundedBytes(stream, TorrentMagnet.MAX_TORRENT_BYTES)
+                            }
+                        }
+                    }
+                    val bytes = try {
+                        readJob.await()
+                    } finally {
+                        streamRef.getAndSet(null)?.let { stream -> runCatching { stream.close() } }
+                        readJob.cancel()
+                    }
+                    when {
+                        bytes == null -> {
+                            PikoLog.w("IncomingLink", "Unavailable or oversized .torrent URI (authority=${uri.authority})")
+                            null
+                        }
+                        else -> withContext(Dispatchers.Default) { TorrentMagnet.fromBytes(bytes) }.also { parsed ->
+                            if (parsed == null) {
+                                PikoLog.w("IncomingLink", "Failed to parse .torrent payload (${bytes.size} bytes)")
+                            }
+                        }
+                    }
+                }
+            } catch (timeout: TimeoutCancellationException) {
+                PikoLog.w("IncomingLink", "Timed out reading .torrent URI (authority=${uri.authority})", timeout)
+                null
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                PikoLog.w("IncomingLink", "Failed to read or parse .torrent URI (authority=${uri.authority})", e)
+                null
+            }
             if (magnet != null) {
                 app.instantMagnetRepository.onIncomingMagnet(magnet)
             } else {
@@ -208,8 +271,8 @@ class MainActivity : ComponentActivity() {
                 IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> emptyList()
         }
-        // AndroidPikoUploadSources 只认 content: URI
-        return uris.filter { it.scheme == ContentResolver.SCHEME_CONTENT }
+        // AndroidPikoUploadSources 只认外部提供的 content: URI，拒绝自身 FileProvider URI 避免回环读取私有目录
+        return uris.filter { it.scheme == ContentResolver.SCHEME_CONTENT && !isOwnFileProviderUri(it) }
     }
 
     /**
@@ -249,7 +312,7 @@ class MainActivity : ComponentActivity() {
 /**
  * Android 13 起通知要在运行时授权，只在清单里声明的话，传输进度与任务结果的通知都发不出来。
  * 等第一次有工作要在后台跑时再问：这时说得清为什么要通知，一打开应用就问多半会被拒。
- * 每个进程只问一次；拒绝两次后系统自己也不再弹。
+ * 每次 Activity 组合生命周期内最多问一次（Activity 重建后若仍未授权会再次检查）；拒绝两次后系统自己也不再弹。
  */
 @Composable
 private fun AskForNotificationsOnFirstWork(services: PikoServices) {
@@ -257,6 +320,9 @@ private fun AskForNotificationsOnFirstWork(services: PikoServices) {
     val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(services) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return@LaunchedEffect
+        }
         // 与拉起前台服务同一个判断（hasBackgroundWork）；任务表是 StateFlow，snapshotFlow 看不到，另外合进来
         combine(snapshotFlow { services.hasBackgroundWork() }, services.downloadManager.tasks, services.uploadManager.tasks,
             services.fileWorkChanges()) { _, _, _, _ ->
@@ -268,8 +334,8 @@ private fun AskForNotificationsOnFirstWork(services: PikoServices) {
 }
 
 private const val TORRENT_MIME_TYPE = "application/x-bittorrent"
+private const val TORRENT_READ_TIMEOUT_MS = 15_000L
 
-/** 进行中的常驻通知点进来时带上，打开传输页看各项进度。 */
 /**
  * 窗口高度 compact（横握的手机）时收起状态栏，下滑临时唤出；导航条不动。整个应用一个入口，按窗口高度生效。
  *
@@ -299,6 +365,7 @@ private fun HideStatusBarWhileShort() {
     }
 }
 
+/** 进行中的常驻通知点进来时带上，打开传输页看各项进度，见 WorkResultNotifier 与 PikoDownloadService。 */
 internal const val EXTRA_OPEN_TRANSFERS = "dev.piko.extra.OPEN_TRANSFERS"
 
 // 与 androidx.activity 的 DefaultLightScrim、DefaultDarkScrim 相同，那两个是 internal

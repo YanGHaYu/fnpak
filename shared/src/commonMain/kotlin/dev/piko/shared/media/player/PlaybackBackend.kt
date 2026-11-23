@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.Flow
  * 读数属性要由 Compose 的 State 支撑，共用层和视图层直接读，读取粒度与重组范围才对得上。
  */
 interface PlaybackBackend {
+    val playbackGeneration: Long get() = 0L
+    val bufferSnapshot: io.github.nihildigit.pikpak.PlaybackBufferSnapshot? get() = null
     val positionMillis: Long
 
     /** 后端还不知道时长时为 0。 */
@@ -81,6 +83,9 @@ interface PlaybackBackend {
      */
     fun addSubtitle(subtitle: ExternalSubtitle) = Unit
 
+    /** 实时更新字幕外观（底色、字体、字号、纵向位置与 ASS 覆盖），播放期间即时生效。 */
+    fun setSubtitleStyle(style: SubtitleStylePrefs) = Unit
+
     /** 为 false 时控件不给旋转入口。 */
     val supportsRotation: Boolean get() = false
 
@@ -101,6 +106,11 @@ interface PlaybackBackend {
     fun mpvProperty(name: String): String? = null
 
     fun stop()
+
+    /** 在后端所属的主调度器上下达停止指令（早于撤回传输层阻塞读），可安全从后台清理协程调用。 */
+    suspend fun beginStop() {
+        stop()
+    }
 
     /**
      * [stop] 是否在独立播放线程上异步卸载输入（如 libmpv）。
@@ -136,6 +146,9 @@ data class MediaTrack(
     val title: String?,
     val language: String?,
     val isExternal: Boolean = false,
+    val externalFilename: String? = null,
+    val codec: String? = null,
+    val isImage: Boolean = false,
 )
 
 /** 随视频一起加载的外挂字幕。[url] 是后端能直接读的地址，[title] 用来在列表里区分。 */
@@ -145,11 +158,15 @@ sealed interface PlaybackTarget {
     /** 本机文件的绝对路径。 */
     data class LocalFile(val path: String) : PlaybackTarget
 
-    data class Url(val url: String) : PlaybackTarget
+    /**
+     * [isMpegTsTranscode] 为 true 时目标为服务端 MPEG-TS 转码流（仅单视频轨 + 单音轨，无内封字幕轨），
+     * 完整播放器可收紧 lavf 探测预算以消除无索引 TS 的多 MiB 前置扫描。
+     */
+    data class Url(val url: String, val isMpegTsTranscode: Boolean = false) : PlaybackTarget
 }
 
 sealed interface PlaybackBackendEvent {
-    /** 本次 open 的第一帧已经出来。 */
+    /** 后端已恢复输出；不等同于屏幕已经呈现首帧。 */
     data object Ready : PlaybackBackendEvent
 
     data object Ended : PlaybackBackendEvent

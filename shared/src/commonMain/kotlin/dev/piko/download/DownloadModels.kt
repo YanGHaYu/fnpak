@@ -88,6 +88,8 @@ data class DownloadTask(
     val parentTaskId: String = "",
     /** 文件夹下载的源文件夹 ID。多选文件批次与单独下载为空串。 */
     val rootFolderId: String = "",
+    /** 本次下载单独指定的保存目录（桌面绝对路径或 Android SAF content: URI）；为 null 或空串时使用全局默认下载目录。 */
+    val targetDirectory: String? = null,
 ) {
     val progress: Float
         get() = progressFraction?.coerceIn(0f, 1f)
@@ -115,4 +117,6 @@ data class DownloadBatch(
     val folderName: String,
     val isFolder: Boolean = true,
     val sourceFolderId: String? = null,
+    /** 本批任务单独指定的保存目录；为 null 或空串时使用全局默认下载目录。 */
+    val targetDirectory: String? = null,
 )

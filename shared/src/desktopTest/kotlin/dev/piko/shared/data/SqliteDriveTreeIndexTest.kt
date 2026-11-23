@@ -4,6 +4,7 @@ import io.github.nihildigit.pikpak.FileKind
 import io.github.nihildigit.pikpak.FileStat
 import kotlinx.io.Buffer
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.io.writeString
 import java.nio.file.Files
 import java.lang.management.ManagementFactory
@@ -25,6 +26,22 @@ class SqliteDriveTreeIndexTest {
         DriveTreeIndex(database = factory.open(account), ownerAccount = account)
     private fun folder(id: String, parent: String = "") = FileStat(id = id, parentId = parent, name = id, kind = FileKind.FOLDER)
     private fun file(id: String, parent: String = "", hash: String = id) = FileStat(id = id, parentId = parent, kind = FileKind.FILE, name = "$id.mp4", size = "100", hash = hash, mimeType = "video/mp4", createdTime = "2025-01-01T00:00:00Z", modifiedTime = "2025-01-02T00:00:00Z")
+
+    @Test fun restoredInvalidationRemainsIncompleteAfterReopen() = fixture { factory ->
+        var index = open(factory)
+        try {
+            val generation = index.beginCandidate()
+            index.appendCandidate(generation, listOf(folder("a"), file("existing", "a")))
+            index.commitCandidate(generation, 100)
+            assertTrue(index.isComplete)
+            index.applyChange(DriveChange.Restored(listOf("restored")))
+            assertFalse(index.isComplete)
+            index.close()
+            index = open(factory)
+            assertFalse(index.isComplete)
+            assertNotNull(index.file("existing"))
+        } finally { index.close() }
+    }
 
     @Test fun candidatesReplayUnknownRenameMoveAndDeletionWithoutPublishingPages() = fixture { factory ->
         val index = open(factory)
@@ -217,7 +234,7 @@ class SqliteDriveTreeIndexTest {
             assertEquals(100, space.items.size)
             assertEquals(99999L, space.fileCount)
             assertEquals(24, space.items.count { it.previewChildren.isNotEmpty() })
-            assertTrue(space.items.filter { it.previewChildren.isNotEmpty() }.all { it.previewChildren.size == 16 })
+            assertTrue(space.items.filter { it.previewChildren.isNotEmpty() }.all { it.previewChildren.size == 24 })
             index.close()
             val provider = object : PikoClientProvider {
                 override val currentClient = kotlinx.coroutines.flow.MutableStateFlow<io.github.nihildigit.pikpak.PikPakClient?>(null)
@@ -240,5 +257,117 @@ class SqliteDriveTreeIndexTest {
             println("SqliteDriveTreeIndexTest wal=true nodes=100000 ingestMs=$ingestMs commitMs=$commitMs searchMs=$searchMs reopenMs=$reopenMs maxHeap=$maxHeap sampledPeakBytes=${peak.get()} retainedHeapBytes=$retainedHeapBytes")
             if (lowHeap) assertTrue(peak.get() < 240L * 1024 * 1024, "Need 16 MiB worker heap headroom")
         } finally { index.close(); sampling.set(false); sampler.join() }
+    }
+
+    @Test
+    fun unchangedSqliteFolderListingAndSelfSyncUploadKeepRevisionAndCanaryClean() = dev.piko.shared.smoke.smoke {
+        val dir = Files.createTempDirectory("piko-sqlite-perf").toFile()
+        try {
+            val server = dev.piko.shared.smoke.FakePikPakServer()
+            val pikoDir = server.addFolder(".piko")
+            val oldSync = server.addFile("settings-100.json", pikoDir.id, content = ByteArray(240), hash = "S100")
+            val mediaDir = server.addFolder("Media")
+            val ep1 = server.addFile("E01.mp4", mediaDir.id, content = ByteArray(1000), hash = "E1")
+            val ep2 = server.addFile("E02.mp4", mediaDir.id, content = ByteArray(1500), hash = "E2")
+            server.quotaUsage = 240L + 1000L + 1500L
+
+            val factory = DesktopPikoTreeDatabaseFactory(dir)
+            val repo = PikoDriveRepository(server.provider(), treeDatabaseFactory = factory)
+            try {
+                repo.getQuota().getOrThrow()
+                repo.warmDriveTree().getOrThrow()
+                assertTrue(repo.driveTreeIndex.isComplete)
+
+                val listing = repo.listBrowsable(mediaDir.id, PikoFileSortOrder.TIME_DESC).getOrThrow()
+                assertEquals(setOf(ep1.id, ep2.id), listing.map { it.id }.toSet())
+                val revAfterFirst = repo.driveTreeIndex.flow.value.revision
+                repo.driveTreeIndex.putFolderListing(mediaDir.id, listing, complete = true)
+                assertEquals(revAfterFirst, repo.driveTreeIndex.flow.value.revision, "内容未变的完整列举不应触发 SQLite 重写与 revision 广播")
+
+                val newPayload = ByteArray(310) { 0x41 }
+                repo.uploadBytes(pikoDir.id, "settings-200.json", newPayload).getOrThrow()
+                repo.delete(listOf(oldSync.id)).getOrThrow()
+                server.quotaUsage = 310L + 1000L + 1500L
+
+                val probeResult = repo.probeRemoteChanges(force = true).getOrThrow()
+                assertTrue(
+                    probeResult != PikoDriveRepository.CanaryProbeResult.FULL_REBUILD,
+                    "本机 .piko 同步轮换不应击穿哨兵探针导致全盘重扫，实际结果：$probeResult",
+                )
+            } finally {
+                repo.enterAccount(null)
+            }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacyVersionsStreamIntoSqliteAndRemoveOnlySuccessfullyMigratedFiles() = runBlocking {
+        val directory = Files.createTempDirectory("piko-tree-migration").toFile()
+        val cache = FilePikoCacheStore(directory.resolve("cache").path)
+        val factory = DesktopPikoTreeDatabaseFactory(directory.resolve("db"))
+        try {
+            for (version in 1..2) {
+                val account = "version$version@example.com"
+                val key = DriveTreeIndex.snapshotKeyOf(account)
+                cache.write(key, """{"schemaVersion":$version,"complete":true,"entries":[{"id":"file","n":"影片.mp4","s":"42","h":"ABC"}]}""")
+                val index = DriveTreeIndex(database = factory.open(account), ownerAccount = account)
+                try {
+                    assertTrue(migrateLegacyTreeCache(index, account, cache))
+                    assertEquals(42L, index.file("file")?.sizeBytes)
+                    assertTrue(index.isComplete)
+                    assertNull(cache.read(key))
+                } finally { index.close() }
+                val reopened = DriveTreeIndex(database = factory.open(account), ownerAccount = account)
+                try { assertEquals(42L, reopened.file("file")?.sizeBytes) } finally { reopened.close() }
+            }
+        } finally { assertTrue(directory.deleteRecursively()) }
+    }
+
+    @Test
+    fun ambiguousLegacyKeyIsDiscardedRatherThanAssignedToEitherCollidingAccount() = runBlocking {
+        val directory = Files.createTempDirectory("piko-tree-ambiguous").toFile()
+        val cache = FilePikoCacheStore(directory.resolve("cache").path)
+        val factory = DesktopPikoTreeDatabaseFactory(directory.resolve("db"))
+        try {
+            for (account in listOf("a+b@example.com", "a_b@example.com")) {
+                val key = DriveTreeIndex.snapshotKeyOf(account)
+                cache.write(key, """{"schemaVersion":2,"complete":true,"entries":[{"id":"unowned","n":"private","s":"42"}]}""")
+                val index = DriveTreeIndex(database = factory.open(account), ownerAccount = account)
+                try {
+                    assertFalse(migrateLegacyTreeCache(index, account, cache))
+                    assertNull(index.file("unowned"))
+                    assertFalse(index.isComplete)
+                    assertNull(cache.read(key))
+                } finally { index.close() }
+            }
+            assertTrue(isUnambiguousLegacyTreeAccount("safe-name@example.com"))
+            assertFalse(isUnambiguousLegacyTreeAccount("name_@example.com"))
+            assertFalse(isUnambiguousLegacyTreeAccount("用户@example.com"))
+        } finally { assertTrue(directory.deleteRecursively()) }
+    }
+
+    @Test
+    fun openingSqliteSucceedsWhenSqliteTmpdirPointsToMissingNestedDirectory() {
+        val root = Files.createTempDirectory("piko-sqlite-tmpdir-test").toFile()
+        val missingTmpDir = root.resolve("missing/nested/natives")
+        val dbDir = root.resolve("db")
+        val prevTmpDir = System.getProperty("org.sqlite.tmpdir")
+        try {
+            assertFalse(missingTmpDir.exists())
+            System.setProperty("org.sqlite.tmpdir", missingTmpDir.absolutePath)
+            DesktopPikoTreeDatabaseFactory(dbDir).open("tmpdir-test@example.com").use { db ->
+                assertTrue(missingTmpDir.isDirectory, "Expected org.sqlite.tmpdir directory to be created before JDBC connect")
+                db.query("SELECT 1").use { cursor ->
+                    assertTrue(cursor.next())
+                    assertEquals(1L, cursor.long(0))
+                }
+            }
+        } finally {
+            if (prevTmpDir == null) System.clearProperty("org.sqlite.tmpdir")
+            else System.setProperty("org.sqlite.tmpdir", prevTmpDir)
+            root.deleteRecursively()
+        }
     }
 }

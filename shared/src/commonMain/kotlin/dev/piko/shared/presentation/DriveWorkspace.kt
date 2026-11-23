@@ -1,5 +1,6 @@
 package dev.piko.shared.presentation
 
+import kotlinx.coroutines.IO
 import dev.piko.shared.data.DriveLibrary
 import dev.piko.shared.data.FolderReferenceSource
 import dev.piko.shared.data.PikoCacheStore
@@ -22,6 +23,15 @@ import dev.piko.shared.state.SaveTargetContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import dev.piko.shared.data.runSuspendCatching
+import dev.piko.shared.log.PikoLog
+import dev.piko.shared.log.logFailure
+import dev.piko.shared.log.logFolder
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,7 +85,8 @@ class DriveWorkspace(
     /**
      * 网盘页的标签，各有自己的路径栈与浏览历史。活动的那个就是 [folderStackFlow] 与 [historyFlow]：
      * 网盘页、定位、快捷访问、信息流都只认这两个，切标签时把它们换成目标标签存着的那一份，别处不用知道有标签。
-     * 这里存的活动标签那一项是切走之前的旧值，读标签用 [tabsFlow]。不落盘，进程内有效。
+     * 活动标签在 [_tabs] 中存的是切走之前的旧快照，实时标签列表统一从 [tabsFlow] 读取；
+     * 标签位置与固定状态经 [saveTabs] 按账号持久化，各标签内的浏览历史仅在当前进程内保留。
      */
     private val _tabs = MutableStateFlow(listOf(DriveTab(FIRST_TAB_ID, listOf(ROOT_BREADCRUMB))))
     private val _activeTabId = MutableStateFlow(FIRST_TAB_ID)
@@ -130,8 +141,20 @@ class DriveWorkspace(
         _tabs.value.filter { it.isPinned }.forEachIndexed { index, tab -> contexts.move(tab.id, index) }
     }
 
-    private val resolvingPins = mutableMapOf<String, Long>()
+    private val resolvingPins = MutableStateFlow<Map<String, Long>>(emptyMap())
     private var reconciledPinRecords: Map<String, PinnedTabRecord> = emptyMap()
+
+    private fun tryClaimPinResolution(pinId: String, updatedAt: Long): Boolean {
+        while (true) {
+            val current = resolvingPins.value
+            if (current[pinId] == updatedAt) return false
+            if (resolvingPins.compareAndSet(current, current + (pinId to updatedAt))) return true
+        }
+    }
+
+    private fun releasePinResolution(pinId: String, updatedAt: Long) {
+        resolvingPins.update { current -> if (current[pinId] == updatedAt) current - pinId else current }
+    }
 
     /** Remote changes update retained tabs without activating them or creating navigation history. */
     private fun reconcilePinnedTabs(records: Map<String, PinnedTabRecord>) {
@@ -159,15 +182,23 @@ class DriveWorkspace(
                 _tabs.update { tabs -> tabs.map { if (it.id == id) it.copy(pinId = record.pinId, stack = next) else it } }
                 if (_activeTabId.value == id) _folderStackFlow.value = next
                 if (next.last().id.isNotEmpty() && isDriveFolderId(next.last().id)) {
-                    if (resolvingPins.put(record.pinId, record.updatedAt) != record.updatedAt) workScope.launch {
-                        val leaf = next.last()
-                        val parentStack = repository.locateFolder(leaf.id).getOrNull() ?: return@launch
-                        val resolved = folderIndex.resolve(parentStack + leaf)
-                        if (navigationAccount.value != account || repository.currentAccount != account) return@launch
-                        val current = pinnedTabs.awaitAccountReady(account)?.get(record.pinId)
-                        if (current != record || !isTabPinned(id) || tabSnapshot(id)?.stack?.lastOrNull()?.id != leaf.id) return@launch
-                        if (resolved.isNotEmpty() && resolved != next) {
-                            updateTabStack(id, resolved, restoring = true)
+                    if (tryClaimPinResolution(record.pinId, record.updatedAt)) workScope.launch {
+                        var resolvedOk = false
+                        try {
+                            val leaf = next.last()
+                            val parentStack = repository.locateFolder(leaf.id)
+                                .logFailure(TAG, "Failed to resolve parent path for pinned tab ${record.pinId} (${logFolder(leaf.id)})")
+                                .getOrNull() ?: return@launch
+                            resolvedOk = true
+                            val resolved = folderIndex.resolve(parentStack + leaf)
+                            if (navigationAccount.value != account || repository.currentAccount != account) return@launch
+                            val current = pinnedTabs.awaitAccountReady(account)?.get(record.pinId)
+                            if (current != record || !isTabPinned(id) || tabSnapshot(id)?.stack?.lastOrNull()?.id != leaf.id) return@launch
+                            if (resolved.isNotEmpty() && resolved != next) {
+                                updateTabStack(id, resolved, restoring = true)
+                            }
+                        } finally {
+                            if (!resolvedOk) releasePinResolution(record.pinId, record.updatedAt)
                         }
                     }
                 }
@@ -229,7 +260,7 @@ class DriveWorkspace(
 
     private val _tabsFlow = MutableStateFlow(_tabs.value)
 
-    /** Retained file browsers, with the primary browser first. */
+    /** Retained file browsers, with pinned tabs leading and [primaryTabId] first among unpinned browsers. */
     val tabsFlow: StateFlow<List<DriveTab>> = _tabsFlow.asStateFlow()
 
     private fun newTabId(excluding: Set<Long> = emptySet()): Long {
@@ -296,9 +327,11 @@ class DriveWorkspace(
 
     // 标签按账号存进缓存目录，重启后接着用。只存各自停在哪、哪个是活动的，历史不存
     private var tabsSave: Job? = null
+    private val pendingTabs = MutableStateFlow<Map<String, SavedTabs>>(emptyMap())
+    private val tabsPersistLock = Mutex()
 
     private fun saveTabs(immediate: Boolean = false) {
-        val store = cacheStore ?: return
+        if (cacheStore == null) return
         val account = navigationAccount.value ?: return
         if (account != repository.currentAccount) return
         val tabs = _tabsFlow.value
@@ -308,16 +341,40 @@ class DriveWorkspace(
             ids = tabs.map { it.id },
             pinIds = tabs.map { it.pinId },
         )
+        pendingTabs.update { it + (account to saved) }
         tabsSave?.cancel()
         tabsSave = workScope.launch {
             if (!immediate) delay(TABS_SAVE_DELAY_MS)
-            runCatching { store.write(tabsKey(account), tabsJson.encodeToString(SavedTabs.serializer(), saved)) }
+            writePendingTabs()
+        }
+    }
+
+    /** 退到后台或系统移除任务时，不等待标签保存的防抖延迟。 */
+    suspend fun flushPersistence() {
+        tabsSave?.cancel()
+        // 写入属于工作区；调用方可停止等待，而不会取消已接受的落盘或被慢 IO 拖过超时。
+        workScope.launch(Dispatchers.IO) { writePendingTabs() }.join()
+    }
+
+    private suspend fun writePendingTabs() {
+        val store = cacheStore ?: return
+        // 已开始的写入必须完成；换号或新的防抖任务不能留下半份旧账号快照。
+        withContext(Dispatchers.IO + NonCancellable) {
+            tabsPersistLock.withLock {
+                pendingTabs.value.forEach { (account, saved) ->
+                    runSuspendCatching {
+                        store.write(tabsKey(account), tabsJson.encodeToString(SavedTabs.serializer(), saved))
+                    }.onSuccess {
+                        pendingTabs.update { pending -> if (pending[account] === saved) pending - account else pending }
+                    }.logFailure(TAG, "Failed to save open tabs (${saved.tabs.size} tabs)")
+                }
+            }
         }
     }
 
     /**
-     * 启动或换号后恢复这个账号上次的标签与位置，只在还停在初始状态（一个标签、在根目录）时做。没有存过的返回 false。
-     * 恢复不记历史，与 [restoreFolderStack] 相同。
+     * 启动或换号后恢复当前账号上次保存的文件标签与位置，仅在未固定文件标签仍停在初始根目录且无外部跳转时执行。
+     * 已存在的固定标签与查重/导入辅助上下文会保留；没有可恢复记录时返回 false。恢复不记浏览历史，与 [restoreFolderStack] 相同。
      */
     override suspend fun restoreLocation(): Boolean {
         val store = cacheStore ?: return false
@@ -326,8 +383,13 @@ class DriveWorkspace(
         if (!canRestoreSavedTabs || _tabs.value.any { !it.isPinned && tabSnapshot(it.id)?.stack?.singleOrNull()?.id != ROOT_BREADCRUMB.id }) return false
         val initialHighlightRevision = highlightRequests.value
         if (pendingByTab.value.values.any { it.isNotEmpty() }) return false
-        val saved = runCatching { store.read(tabsKey(account))?.let { tabsJson.decodeFromString(SavedTabs.serializer(), it) } }.getOrNull()
-            ?: return false
+        val key = tabsKey(account)
+        val raw = runSuspendCatching { store.read(key) }
+            .logFailure(TAG, "Failed to read saved tabs snapshot")
+            .getOrNull() ?: return false
+        val saved = runSuspendCatching { tabsJson.decodeFromString(SavedTabs.serializer(), raw) }
+            .logFailure(TAG, "Failed to decode saved tabs snapshot; resetting to root")
+            .getOrNull() ?: return false
         // 读取缓存期间可能已经导航或换号，旧的恢复结果不能覆盖用户刚打开的位置。
         if (!canRestoreSavedTabs || highlightRequests.value != initialHighlightRevision || repository.currentAccount != account) return false
         // Older releases saved duplicate report positions as tabs. Their task state was never saved,
@@ -368,10 +430,11 @@ class DriveWorkspace(
             }
         }
         publishTabs()
+        PikoLog.d(TAG, "Restored ${_tabs.value.size} saved tabs (${_tabs.value.count { it.isPinned }} pinned)")
         return true
     }
 
-    // 眼前的路径、标签与缓存属于哪个账号，见 enterAccount
+    // 当前工作区导航栈、标签集合与缓存快照归属的账号（与 repository.currentAccount 对齐后才落盘），见 enterAccount
     private val navigationAccount = MutableStateFlow<String?>(null)
 
     /**
@@ -388,11 +451,15 @@ class DriveWorkspace(
             if (!navigationAccount.compareAndSet(previous, account)) continue
             entrySnapshots.value = emptyMap()
             reconciledPinRecords = emptyMap()
-            resolvingPins.clear()
+            resolvingPins.value = emptyMap()
             canRestoreSavedTabs = true
-            if (previous == null) return
+            if (previous == null) {
+                PikoLog.d(TAG, "Initialized workspace for active account")
+                return
+            }
             break
         }
+        PikoLog.i(TAG, if (account == null) "Cleared workspace on sign-out" else "Reset workspace for account switch")
         val root = DriveTab(newTabId(), listOf(ROOT_BREADCRUMB))
         _tabs.value = listOf(root)
         _activeTabId.value = root.id
@@ -440,7 +507,7 @@ class DriveWorkspace(
             try { contexts.activate(id) } finally { selectingFileContext = false }
         }
         if (id == active) return
-        // 先把眼下的位置存回活动标签，再换成目标标签的
+        // 将当前活动标签实时持有的 folderStackFlow 与 historyFlow 快照写回 _tabs，再切换为目标标签状态
         _tabs.update { tabs -> tabs.map { if (it.id == active) it.copy(stack = _folderStackFlow.value, history = _historyFlow.value) else it } }
         _activeTabId.value = id
         _historyFlow.value = target.history
@@ -501,7 +568,7 @@ class DriveWorkspace(
         return contexts.close(id)?.also(onContextClosed)
     }
 
-    /** 眼前的位置：活动标签、它的路径栈与浏览历史。交给 [returnTo] 就能整个回到这里。 */
+    /** 工作区文件浏览位置快照（含目标标签 ID、路径栈、浏览历史与所属账号），供 [returnTo] 完整还原临时跳转前的现场。 */
     class DriveLocation internal constructor(
         internal val owner: DriveWorkspace,
         internal val tabId: Long,
@@ -582,34 +649,9 @@ class DriveWorkspace(
     /** 最近去过的文件夹（整条路径），新的在前，命令面板用，见 [RecentFolders]。 */
     override val recentFoldersFlow: StateFlow<List<List<PikoPathBreadcrumb>>> get() = recentFolders.flow
 
-    /**
-     * 人在网盘里往别处走（进出文件夹、面包屑、后退前进、从别处跳进来）之前问一声，返回 false 即拦下、栈不动；
-     * 拦下的一方问过人之后调 retry 把同一步再走一遍；普通导航不结束业务会话。
-     * 在换栈之前拦，而不是换了再跳回去：那样历史里多出一步，画面也闪一下。
-     * 换账号、启动时恢复、切标签与信息流的继续刷不经它：那不是人在这个位置里往外走。
-     */
-    fun interface LeaveGuard {
-        fun allows(next: List<PikoPathBreadcrumb>, retry: () -> Unit): Boolean
-    }
-
-    var leaveGuard: LeaveGuard? = null
-
-    private fun leaveAllowed(next: List<PikoPathBreadcrumb>, retry: () -> Unit): Boolean = leaveGuard?.allows(next, retry) ?: true
-
-    /**
-     * 换栈之外还有别的步骤的导航（先切到网盘页、跳过去后标出某一项）：按要去的 [next] 先问 [leaveGuard]，问的是整个 [action]。
-     * 拦下后取消就什么都没发生，确认后重走的是整个动作；只靠换栈时的那一问，切页已经发生、标出那一步也丢了。
-     */
     override fun navigateThen(next: List<PikoPathBreadcrumb>, action: () -> Unit) {
-        if (leaveAllowed(next, action)) action()
+        action()
     }
-
-    /**
-     * 活动标签停在会话的位置（查重，见 [DriveLibrary.isSession]）、那个会话还没结束时为真，由主界面装上。
-     * 这时换栈改为另开一个普通标签：会话标签只是一个位置，改写它，会话还在、标签却没了，成了关不掉的孤儿。
-     * 只在有标签栏时为真；移动端的返回不结束扫描或报告。
-     */
-    var sessionTabHeld: (DriveLibrary) -> Boolean = { false }
 
     /** 把栈换成 [requested]，换了才把原来的位置记进后退、清掉前进。 */
     private fun moveTo(requested: List<PikoPathBreadcrumb>) {
@@ -618,23 +660,15 @@ class DriveWorkspace(
         val previous = _folderStackFlow.value
         if (next == previous) return
         canRestoreSavedTabs = false
-        if (!leaveAllowed(next) { moveTo(requested) }) return
-        val session = previous.library?.takeIf { it.isSession }
-        if (session != null && next.library != session && sessionTabHeld(session)) {
-            openTab(next)
-            return
-        }
         _folderStackFlow.value = next
         _historyFlow.update { it.visited(previous) }
         stackChanged()
     }
 
-    /** 后退了返回 true。被 [leaveGuard] 拦下也返回 true：这一下已经有人接着处理，调用方不要再退到别处。 */
     override fun goBack(): Boolean {
         refreshFolderReferences()
         val history = _historyFlow.value
         val target = history.back.lastOrNull() ?: return false
-        if (!leaveAllowed(target) { goBack() }) return true
         _historyFlow.value = FolderHistory(back = history.back.dropLast(1), forward = history.forward + listOf(_folderStackFlow.value))
         _folderStackFlow.value = target
         stackChanged()
@@ -645,7 +679,6 @@ class DriveWorkspace(
         refreshFolderReferences()
         val history = _historyFlow.value
         val target = history.forward.lastOrNull() ?: return false
-        if (!leaveAllowed(target) { goForward() }) return true
         _historyFlow.value = FolderHistory(back = history.back + listOf(_folderStackFlow.value), forward = history.forward.dropLast(1))
         _folderStackFlow.value = target
         stackChanged()
@@ -835,6 +868,7 @@ class DriveWorkspace(
     }
 
     companion object {
+        private const val TAG = "DriveWorkspace"
         private const val FIRST_TAB_ID = 1L
         private const val TABS_SAVE_DELAY_MS = 1_000L
     }

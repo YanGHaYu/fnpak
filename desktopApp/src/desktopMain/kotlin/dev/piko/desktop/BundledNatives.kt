@@ -1,5 +1,6 @@
 package dev.piko.desktop
 
+import dev.piko.shared.log.PikoLog
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -20,6 +21,19 @@ internal fun useBundledJnaDispatch() {
     if (!dir.resolve(System.mapLibraryName("jnidispatch")).isFile) return
     System.setProperty("jna.boot.library.path", dir.absolutePath)
     System.setProperty("jna.nounpack", "true")
+}
+
+/**
+ * sqlite-jdbc 默认每次启动都在 tmpdir 下释放带随机 UUID 的 `sqlite-<ver>-<uuid>-sqlitejdbc.dll` 并写 `.lck` 后载入。
+ * 安装包在构建期从 sqlite-jdbc jar 预提取随包 `sqlite/` 目录里的同一份 DLL，启动时指向该目录免去运行期释放。
+ * 必须在首次加载 `org.sqlite.JDBC` 之前设置；资源目录里没有时（开发版、测试）沿用原有提取逻辑。
+ */
+internal fun useBundledSqlite() {
+    val dir = bundledResources?.resolve("sqlite") ?: return
+    val libName = System.mapLibraryName("sqlitejdbc")
+    if (!dir.resolve(libName).isFile) return
+    System.setProperty("org.sqlite.lib.path", dir.absolutePath)
+    System.setProperty("org.sqlite.lib.name", libName)
 }
 
 /**
@@ -49,6 +63,7 @@ internal object BundledMpvRuntime {
         // Windows 上是 mediampv.dll，macOS 上是 libmediampv.dylib，Linux 上是 libmediampv.so
         if (!dir.resolve(System.mapLibraryName("mediampv")).isFile) return
         runCatching { MpvMediampPlayer.prepareLibraries(dir.absolutePath, false) }
+            .onFailure { PikoLog.w("Player", "Failed to prepare bundled mpv native libraries from ${dir.absolutePath}", it) }
     }
 
     /**
@@ -57,7 +72,9 @@ internal object BundledMpvRuntime {
      */
     fun ensure(timeoutMillis: Long = 3_000) {
         prepareInBackground()
-        done.await(timeoutMillis, TimeUnit.MILLISECONDS)
+        if (!done.await(timeoutMillis, TimeUnit.MILLISECONDS)) {
+            PikoLog.w("Player", "Timed out waiting ${timeoutMillis}ms for bundled mpv native libraries to prepare")
+        }
     }
 
     val isPrepared: Boolean get() = done.count == 0L

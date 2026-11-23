@@ -3,10 +3,10 @@ package dev.piko.ui
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -48,7 +48,8 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TonalToggleButton
+import androidx.compose.material3.FilledTonalToggleButton
+import androidx.compose.material3.FilledTonalToggleButtonDefaults
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteItem
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
@@ -56,7 +57,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.SaveableStateHolder
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.backhandler.BackHandler
@@ -88,6 +93,7 @@ import dev.piko.shared.presentation.localizedName
 import dev.piko.shared.state.DriveBrowserSession
 import dev.piko.shared.state.QuickAccessState
 import dev.piko.ui.components.CommandPalette
+import dev.piko.ui.components.FeedExitConfirmCheckbox
 import dev.piko.ui.components.FileDragOverlay
 import dev.piko.ui.components.FileDragState
 import dev.piko.ui.components.PaletteItem
@@ -101,7 +107,9 @@ import dev.piko.ui.i18n.stringResource
 import dev.piko.ui.navigation.MainTab
 import dev.piko.ui.navigation.Screen
 import dev.piko.ui.platform.LocalPikoPlatform
+import dev.piko.ui.platform.LocalWindowCaption
 import dev.piko.ui.platform.ShortcutModifier
+import dev.piko.ui.platform.captionExclusion
 import dev.piko.ui.platform.windowDragArea
 import dev.piko.ui.resources.Res
 import dev.piko.ui.resources.common_cancel
@@ -119,7 +127,10 @@ import dev.piko.ui.screens.settings.ProfileScreen
 import dev.piko.ui.screens.transfers.TransfersScreen
 import dev.piko.ui.theme.LocalPikoMotion
 import dev.piko.ui.theme.ThemeMode
+import dev.piko.ui.theme.LocalAppearance
+import dev.piko.ui.theme.isEInk
 import dev.piko.ui.theme.frame
+import kotlinx.coroutines.launch
 import dev.piko.ui.workbench.ClaimDialog
 import dev.piko.ui.workbench.LocatingOverlay
 import dev.piko.ui.workbench.OngoingWorkSheet
@@ -127,10 +138,10 @@ import dev.piko.ui.workbench.ShortcutsDialog
 import dev.piko.ui.workbench.SidebarAccountRow
 import dev.piko.ui.workbench.SidebarTransferReadout
 import dev.piko.ui.workbench.TaskSlot
-import dev.piko.ui.workbench.TransferActivity
 import dev.piko.ui.workbench.WorkspaceContextDialogs
 import dev.piko.ui.workbench.WorkspaceContextHost
 import dev.piko.ui.workbench.WorkspaceViewModel
+import dev.piko.ui.workbench.rememberActiveTransferCount
 import dev.piko.ui.workbench.rememberTransferActivity
 import io.github.nihildigit.pikpak.FileStat
 
@@ -175,6 +186,7 @@ internal fun MainHomeContent(
     feedShown: Boolean,
     feedOpened: Boolean,
     feedSuspended: Boolean,
+    feedPausedByHost: Boolean,
     feedFullScreen: Boolean,
     feedBlockedReason: String?,
     feedDetourTab: Long?,
@@ -187,6 +199,7 @@ internal fun MainHomeContent(
     onTabClick: (MainTab) -> Unit,
     onMeasuredContentSize: (IntSize) -> Unit,
     onPlayVideo: (FileStat, List<FileStat>) -> Unit,
+    onOpenDocument: (FileStat) -> Unit = {},
     onPlayLocal: (String, String, String?) -> Unit,
     onRevealById: (String) -> Unit,
     onOpenCloudFile: suspend (String, String) -> Boolean,
@@ -222,6 +235,7 @@ internal fun MainHomeContent(
                     WorkspaceContextHost(
                         model = workspaceModel,
                         onPlay = onPlayVideo,
+                        onOpenDocument = onOpenDocument,
                         onReveal = { file -> onRevealById(file.id) },
                         onTransfers = onOpenTransfers,
                         onOpenSpaceMap = onOpenSpaceMap,
@@ -231,6 +245,7 @@ internal fun MainHomeContent(
                         key(fileBrowser) {
                             FilesScreen(
                                 onNavigateToVideoPlayer = onPlayVideo,
+                                onOpenDocument = onOpenDocument,
                                 scrollToTopRequests = filesScrollToTop,
                                 onOpenTransfers = onOpenTransfers,
                                 onOpenDuplicateReport = onOpenDuplicateReport,
@@ -274,7 +289,7 @@ internal fun MainHomeContent(
         }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
         BackHandler(enabled = currentTab != MainTab.FILES && !feedFullScreen) {
             onSelectMainTab(MainTab.FILES)
         }
@@ -288,29 +303,38 @@ internal fun MainHomeContent(
             else -> null
         }
         val selectingFiles = currentTab == MainTab.FILES && activeDriveState?.isSelectionMode == true
-        val navigationSuiteType = if (sidebarMode || selectingFiles) NavigationSuiteType.None else NavigationSuiteType.ShortNavigationBarCompact
+        val navigationSuiteType = when {
+            sidebarMode || selectingFiles -> NavigationSuiteType.None
+            heightCompact -> NavigationSuiteType.WideNavigationRailCollapsed
+            else -> NavigationSuiteType.ShortNavigationBarCompact
+        }
 
-        NavigationSuiteScaffold(
-            containerColor = if (sidebarMode) MaterialTheme.colorScheme.frame else MaterialTheme.colorScheme.background,
-            navigationItems = {
-                val activity = if (sidebarMode) null else rememberTransferActivity(pollCloud = false)
-                MainTab.entries.forEach { tab ->
-                    val selected = currentTab == tab
-                    val badgeCount = activity?.count?.takeIf { tab == MainTab.TRANSFERS && !selected && it > 0 }
-                    NavigationSuiteItem(
-                        selected = selected,
-                        onClick = { onTabClick(tab) },
-                        navigationSuiteType = navigationSuiteType,
-                        icon = { Icon(imageVector = tab.icon(selected), contentDescription = null) },
-                        label = { Text(tab.title, fontWeight = if (selected) FontWeight.Bold else null) },
-                        badge = badgeCount?.let { count -> { Badge { Text(if (count > 99) "99+" else "$count") } } },
-                    )
-                }
-            },
-            navigationSuiteType = navigationSuiteType,
-            navigationItemVerticalArrangement = Arrangement.Center,
-            content = mainContent,
-        )
+        // 全屏信息流盖在文件工作区之上时撤掉底下标签栏/地址栏的标题栏登记，改由信息流顶栏单独接管
+        CompositionLocalProvider(
+            LocalWindowCaption provides if (feedFullScreen) null else LocalWindowCaption.current,
+        ) {
+            NavigationSuiteScaffold(
+                containerColor = if (sidebarMode) MaterialTheme.colorScheme.frame else MaterialTheme.colorScheme.background,
+                navigationItems = {
+                    val activeTransferCount = if (sidebarMode) 0 else rememberActiveTransferCount()
+                    MainTab.entries.forEach { tab ->
+                        val selected = currentTab == tab
+                        val badgeCount = activeTransferCount.takeIf { tab == MainTab.TRANSFERS && !selected && it > 0 }
+                        NavigationSuiteItem(
+                            selected = selected,
+                            onClick = { onTabClick(tab) },
+                            navigationSuiteType = navigationSuiteType,
+                            icon = { Icon(imageVector = tab.icon(selected), contentDescription = null) },
+                            label = { Text(tab.title, fontWeight = if (selected) FontWeight.Bold else null) },
+                            badge = badgeCount?.let { count -> { Badge { Text(if (count > 99) "99+" else "$count") } } },
+                        )
+                    }
+                },
+                navigationSuiteType = navigationSuiteType,
+                navigationItemVerticalArrangement = Arrangement.Center,
+                content = mainContent,
+            )
+        }
 
         BackHandler(enabled = feedFullScreen, onBack = onRequestCloseFeed)
         AnimatedVisibility(
@@ -324,7 +348,7 @@ internal fun MainHomeContent(
                 visible = feedFullScreen,
                 feedOpened = feedOpened,
                 onHome = onHome,
-                feedSuspended = feedSuspended,
+                feedSuspended = feedPausedByHost,
                 onRequestCloseFeed = onRequestCloseFeed,
                 onPlayFromFeed = onPlayFromFeed,
                 onLocateFromFeed = onLocateFromFeed,
@@ -351,6 +375,7 @@ internal fun MainSidebarSlot(
     onOpenPage: (Screen) -> Unit,
     onToggleLibrary: (DriveLibrary) -> Unit,
     onToggleCollapsed: () -> Unit,
+    scrollState: ScrollState = rememberScrollState(),
 ) {
     val pinnedFolders by quickAccess.pinnedFolders.collectAsStateWithLifecycle(emptyList())
     MainSidebar(
@@ -366,6 +391,7 @@ internal fun MainSidebarSlot(
         onToggleLibrary = onToggleLibrary,
         collapsed = collapsed,
         onToggleCollapsed = onToggleCollapsed,
+        scrollState = scrollState,
     )
 }
 
@@ -401,15 +427,28 @@ internal fun MainShellOverlays(
     FileDragOverlay(fileDrag)
 
     if (workspaceModel.askingCloseFeed) {
+        val scope = rememberCoroutineScope()
+        var dontAskAgain by remember { mutableStateOf(false) }
         PikoDialog(
             onDismissRequest = { workspaceModel.askingCloseFeed = false },
             title = { Text(stringResource(Res.string.text_close_feed_alt)) },
-            text = { Text(stringResource(Res.string.text_closing_clears_the_current_queue_and_browsing_progress)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(Res.string.text_closing_clears_the_current_queue_and_browsing_progress))
+                    FeedExitConfirmCheckbox(
+                        checked = dontAskAgain,
+                        onCheckedChange = { dontAskAgain = it },
+                    )
+                }
+            },
             confirmButton = {
                 PikoDialogConfirm(
                     tr("关闭", "Close", "閉じる", "닫기", "關閉"),
                     destructive = true,
                     onClick = {
+                        if (dontAskAgain) {
+                            scope.launch { services.preferences.setSkipFeedExitConfirm(true) }
+                        }
                         workspaceModel.askingCloseFeed = false
                         onConfirmCloseFeed()
                     },
@@ -551,7 +590,13 @@ internal fun MainTab.icon(selected: Boolean) = when (this) {
 private val SidebarFadeLength = 24.dp
 
 private fun Modifier.scrollFadeEdges(state: ScrollState, length: Dp): Modifier = this
-    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .graphicsLayer {
+        compositingStrategy = if (state.canScrollBackward || state.canScrollForward) {
+            CompositingStrategy.Offscreen
+        } else {
+            CompositingStrategy.Auto
+        }
+    }
     .drawWithContent {
         drawContent()
         val fade = length.toPx().coerceAtMost(size.height / 2)
@@ -586,6 +631,7 @@ private fun MainSidebar(
     onToggleLibrary: (DriveLibrary) -> Unit,
     collapsed: Boolean,
     onToggleCollapsed: (() -> Unit)?,
+    scrollState: ScrollState = rememberScrollState(),
 ) {
     CompositionLocalProvider(LocalSidebarCollapsed provides collapsed) {
         Column(modifier = Modifier.width(width).fillMaxHeight()) {
@@ -603,22 +649,20 @@ private fun MainSidebar(
                         label = if (collapsed) tr("展开侧边栏", "Expand sidebar", "サイドバーを展開", "사이드바 펼치기", "展開側邊欄") else tr("收起侧边栏", "Collapse sidebar", "サイドバーを折りたたむ", "사이드바 접기", "收合側邊欄"),
                         onClick = onToggleCollapsed,
                         shortcut = LocalPikoPlatform.current.shortcutModifier.label("B"),
-                        modifier = if (collapsed) Modifier else Modifier.padding(end = 8.dp),
+                        modifier = (if (collapsed) Modifier else Modifier.padding(end = 8.dp)).captionExclusion(),
                     )
                 }
             }
-            val itemsScroll = rememberScrollState()
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .scrollFadeEdges(itemsScroll, SidebarFadeLength)
-                    .verticalScroll(itemsScroll)
+                    .scrollFadeEdges(scrollState, SidebarFadeLength)
+                    .verticalScroll(scrollState)
                     .padding(start = if (collapsed) 0.dp else 12.dp, end = if (collapsed) 0.dp else 12.dp, bottom = 16.dp),
             ) {
                 MainTabSwitch(
                     currentTab = currentTab.takeIf { selectedPage == null },
                     onTabClick = onTabClick,
-                    activity = rememberTransferActivity(),
                     collapsed = collapsed,
                 )
                 QuickAccessSection(
@@ -647,39 +691,58 @@ private fun MainSidebar(
 }
 
 @Composable
-private fun MainTabSwitch(currentTab: MainTab?, onTabClick: (MainTab) -> Unit, activity: TransferActivity, collapsed: Boolean) {
+private fun MainTabSwitch(currentTab: MainTab?, onTabClick: (MainTab) -> Unit, collapsed: Boolean) {
     val tabs = listOf(MainTab.FILES, MainTab.TRANSFERS)
     val snail by LocalPikoServices.current.preferences.snailModeFlow.collectAsStateWithLifecycle(initialValue = SnailMode())
+    val shortcutModifier = LocalPikoPlatform.current.shortcutModifier
     if (collapsed) {
         tabs.forEach { tab ->
             val selected = tab == currentTab
-            val snailed = tab == MainTab.TRANSFERS && snail.enabled
-            SidebarItem(
-                icon = tab.icon(false),
-                selectedIcon = tab.icon(true),
-                label = if (snailed) tr("任务（蜗牛模式）", "Tasks (snail mode)", "タスク（低速モード）", "작업 (저속 모드)", "任務（蝸牛模式）") else tab.title,
-                selected = selected,
-                onClick = { onTabClick(tab) },
-                trailing = if (tab == MainTab.TRANSFERS && activity.hasReadout) {
-                    { SidebarTransferReadout(activity, checked = selected) }
-                } else null,
-                accent = snailed,
-            )
+            if (tab == MainTab.TRANSFERS) {
+                CollapsedTransfersSidebarItem(
+                    selected = selected,
+                    snailed = snail.enabled,
+                    shortcut = shortcutModifier.label("2"),
+                    onClick = { onTabClick(tab) },
+                )
+            } else {
+                SidebarItem(
+                    icon = tab.icon(false),
+                    selectedIcon = tab.icon(true),
+                    label = tab.title,
+                    selected = selected,
+                    onClick = { onTabClick(tab) },
+                    shortcut = shortcutModifier.label("1"),
+                )
+            }
         }
         return
     }
+    val isEInk = LocalAppearance.current.isEInk
+    val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
     ) {
         tabs.forEachIndexed { index, tab ->
             val selected = tab == currentTab
-            TonalToggleButton(
+            FilledTonalToggleButton(
                 checked = selected,
                 onCheckedChange = { onTabClick(tab) },
                 shapes = connectedToggleShapes(index, tabs.size),
+                colors = if (isEInk) {
+                    FilledTonalToggleButtonDefaults.colors(
+                        containerColor = Color.White,
+                        contentColor = Color.Black,
+                        checkedContainerColor = Color.Black,
+                        checkedContentColor = Color.White,
+                    )
+                } else {
+                    FilledTonalToggleButtonDefaults.colors()
+                },
+                border = if (isEInk) BorderStroke(1.dp, colors.outline) else null,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                modifier = Modifier.weight(1f).height(if (activity.hasReadout) 48.dp else 40.dp),
+                modifier = Modifier.weight(1f).height(48.dp),
             ) {
                 val snailed = tab == MainTab.TRANSFERS && snail.enabled && !selected
                 CompositionLocalProvider(LocalContentColor provides if (snailed) MaterialTheme.colorScheme.tertiary else LocalContentColor.current) {
@@ -694,11 +757,46 @@ private fun MainTabSwitch(currentTab: MainTab?, onTabClick: (MainTab) -> Unit, a
                                 maxLines = 1,
                             )
                         }
-                        if (tab == MainTab.TRANSFERS && activity.hasReadout) SidebarTransferReadout(activity, checked = selected, compact = true)
+                        if (tab == MainTab.TRANSFERS) ExpandedTransfersReadout(selected = selected)
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CollapsedTransfersSidebarItem(
+    selected: Boolean,
+    snailed: Boolean,
+    shortcut: String,
+    onClick: () -> Unit,
+) {
+    val activity = rememberTransferActivity()
+    val showSpeedOnRail = activity.maxSpeed > 0L
+    val tab = MainTab.TRANSFERS
+    SidebarItem(
+        icon = tab.icon(false),
+        selectedIcon = tab.icon(true),
+        label = if (snailed) tr("任务（蜗牛模式）", "Tasks (snail mode)", "タスク（低速モード）", "작업 (저속 모드)", "任務（蝸牛模式）") else tab.title,
+        selected = selected,
+        onClick = onClick,
+        trailing = if (showSpeedOnRail) {
+            { SidebarTransferReadout(activity, checked = selected, railCompact = true) }
+        } else null,
+        accent = snailed,
+        shortcut = shortcut,
+        tooltipDetail = if (activity.hasReadout) activity.summaryText() else null,
+        badgeCount = if (!showSpeedOnRail) activity.attentionCount else 0,
+        badgeDot = !showSpeedOnRail && activity.attentionCount == 0 && activity.count > 0,
+    )
+}
+
+@Composable
+private fun ExpandedTransfersReadout(selected: Boolean) {
+    val activity = rememberTransferActivity()
+    if (activity.hasReadout) {
+        SidebarTransferReadout(activity, checked = selected, compact = true)
     }
 }
 

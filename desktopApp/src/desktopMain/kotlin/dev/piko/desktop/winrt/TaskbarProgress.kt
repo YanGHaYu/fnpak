@@ -1,5 +1,6 @@
 package dev.piko.desktop.winrt
 
+import dev.piko.shared.log.PikoLog
 import java.awt.Window
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
@@ -94,9 +95,13 @@ object TaskbarProgress {
                 for (window in pending.keys) {
                     val request = pending.remove(window) ?: continue
                     runCatching { apply(window, request) }
+                        .onFailure { PikoLog.w("Taskbar", "Failed to update taskbar progress", it) }
                 }
             }
-        }.onFailure { drainScheduled.set(false) }
+        }.onFailure {
+            drainScheduled.set(false)
+            PikoLog.w("Taskbar", "Failed to schedule taskbar progress update", it)
+        }
     }
 
     /** 在专用线程上执行一份请求。窗口已销毁时拿不到 HWND，直接丢弃。 */
@@ -104,11 +109,11 @@ object TaskbarProgress {
         val list = taskbarList() ?: return
         val hwnd = Win32Window.handleOf(window) ?: return
         request.state?.let { state ->
-            ComInterop.hresult(ComInterop.vtable(list, 10, setProgressStateDescriptor), list, hwnd, state.flag)
+            ComInterop.invokeVtable(list, 10, setProgressStateDescriptor, list, hwnd, state.flag)
         }
         if (request.hasValue) {
-            ComInterop.hresult(
-                ComInterop.vtable(list, 9, setProgressValueDescriptor),
+            ComInterop.invokeVtable(
+                list, 9, setProgressValueDescriptor,
                 list, hwnd, request.completed, request.total,
             )
         }
@@ -123,10 +128,13 @@ object TaskbarProgress {
             val hr = ComInterop.hresult(ComInterop.vtable(list, 3, ComInterop.callThis), list)
             if (hr < 0) {
                 ComInterop.release(list)
-                error("ITaskbarList.HrInit 失败：HRESULT 0x%08X".format(hr))
+                error("ITaskbarList.HrInit failed: HRESULT 0x%08X".format(hr))
             }
             list
-        }.onFailure { initFailed = true }.getOrNull().also { taskbar = it }
+        }.onFailure {
+            initFailed = true
+            PikoLog.w("Taskbar", "Failed to initialize ITaskbarList3", it)
+        }.getOrNull().also { taskbar = it }
     }
 }
 
@@ -141,6 +149,7 @@ internal object ComInterop {
     private const val RPC_E_CHANGED_MODE = 0x80010106.toInt()
 
     private val linker = Linker.nativeLinker()
+    private val virtualDowncalls = ConcurrentHashMap<FunctionDescriptor, MethodHandle>()
 
     // 全部延迟：guid 会触发本对象初始化，非 Windows 上找不到 ole32，不能让它在初始化时就抛出
     private val ole32 by lazy { SymbolLookup.libraryLookup("ole32", Arena.global()) }
@@ -184,18 +193,33 @@ internal object ComInterop {
         coTaskMemFree.invokeWithArguments(pointer)
     }
 
-    /** 取 COM 对象虚表的第 [index] 项。对象指针所指的第一个字就是虚表地址。 */
-    fun vtable(obj: MemorySegment, index: Int, descriptor: FunctionDescriptor): MethodHandle {
+    /** 按 FunctionDescriptor 缓存无绑定虚表下调句柄，避免每次调用重编译本地 downcall 桩。 */
+    private fun virtualDowncall(descriptor: FunctionDescriptor): MethodHandle =
+        virtualDowncalls.computeIfAbsent(descriptor) { linker.downcallHandle(it) }
+
+    private fun vtableEntry(obj: MemorySegment, index: Int): MemorySegment {
         val table = obj.reinterpret(ADDRESS.byteSize()).get(ADDRESS, 0)
-        val function = table.reinterpret(ADDRESS.byteSize() * (index + 1)).getAtIndex(ADDRESS, index.toLong())
-        return linker.downcallHandle(function, descriptor)
+        return table.reinterpret(ADDRESS.byteSize() * (index + 1)).getAtIndex(ADDRESS, index.toLong())
+    }
+
+    /** 取 COM 对象虚表的第 [index] 项。对象指针所指的第一个字就是虚表地址。 */
+    fun vtable(obj: MemorySegment, index: Int, descriptor: FunctionDescriptor): MethodHandle =
+        virtualDowncall(descriptor).bindTo(vtableEntry(obj, index))
+
+    /** 热点路径直调 COM 虚表：复用了缓存的无绑定下调句柄，零动态桩编译、零 bindTo 分配。 */
+    fun invokeVtable(obj: MemorySegment, index: Int, descriptor: FunctionDescriptor, vararg args: Any): Int {
+        val function = vtableEntry(obj, index)
+        val combined = arrayOfNulls<Any>(args.size + 1)
+        combined[0] = function
+        System.arraycopy(args, 0, combined, 1, args.size)
+        return virtualDowncall(descriptor).invokeWithArguments(*combined) as Int
     }
 
     // invokeWithArguments 的理由同 WindowsToast：invokeExact 要求调用点静态类型与描述符逐位一致
     fun hresult(handle: MethodHandle, vararg args: Any): Int = handle.invokeWithArguments(*args) as Int
 
     fun check(hr: Int, what: String) {
-        if (hr < 0) error("$what 失败：HRESULT 0x%08X".format(hr))
+        if (hr < 0) error("$what failed: HRESULT 0x%08X".format(hr))
     }
 
     /** GUID 的内存布局：前三段按小端存放，后两段按字节原样。 */

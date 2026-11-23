@@ -1,4 +1,7 @@
+// 上游把 UI 拆成多个模块后通过 build-logic 共享构建约定；fpk-only 构建不配置这些模块，
+// 但完整构建（-Pfnpak.full=true）需要它。
 pluginManagement {
+    includeBuild("build-logic")
     repositories {
         google {
             content {
@@ -43,6 +46,12 @@ val includeAll = fullBuild || legacyFpkOnly.getOrNull() == false
 if (includeAll) {
     include(":app")
     include(":shared")
+    include(":ui-core")
+    include(":ui-drive")
+    include(":ui-player")
+    include(":ui-settings")
+    include(":ui-transfers")
+    include(":ui-reader")
     include(":ui")
     include(":desktopApp")
     include(":cli")

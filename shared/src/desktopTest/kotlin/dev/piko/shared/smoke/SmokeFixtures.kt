@@ -1,8 +1,12 @@
 package dev.piko.shared.smoke
 
+import dev.piko.data.auth.CachePolicyDefaults
 import dev.piko.data.auth.PikoUserPreferences
+import dev.piko.data.auth.PlayerGestureDefaults
 import dev.piko.data.auth.SidePanelPrefs
 import dev.piko.data.auth.SnailMode
+import dev.piko.shared.data.DriveAppearancePrefs
+import dev.piko.shared.media.player.PlayerLayoutPrefs
 import dev.piko.shared.net.ProxySetting
 import dev.piko.shared.data.PikoCredentials
 import dev.piko.shared.data.PikoSessionStore
@@ -12,10 +16,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
@@ -33,7 +38,7 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun getPlaybackPosition(fileId: String): Long = positions[fileId] ?: 0L
     override suspend fun saveLastFolder(folderId: String, folderName: String, stackSerialized: String) = Unit
     override suspend fun getLastFolder(): Triple<String, String, String> = Triple("", "我的网盘", "")
-    override val spoilerBlurFlow: Flow<Boolean> = MutableStateFlow(true)
+    override val spoilerBlurFlow: Flow<Boolean> = MutableStateFlow(false)
     override suspend fun setSpoilerBlurEnabled(enabled: Boolean) = Unit
     override val autoCheckUpdatesFlow: Flow<Boolean> = MutableStateFlow(true)
     override suspend fun setAutoCheckUpdates(enabled: Boolean) = Unit
@@ -43,7 +48,7 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun setReduceMotion(enabled: Boolean) = Unit
     override val hardwareDecodingFlow: Flow<Boolean> = MutableStateFlow(true)
     override suspend fun setHardwareDecoding(enabled: Boolean) = Unit
-    override val playbackMaxHeightFlow: Flow<Int> = MutableStateFlow(0)
+    override val playbackMaxHeightFlow: Flow<Int> = MutableStateFlow(PlayerGestureDefaults.PLAYBACK_AUTO_HEIGHT)
     override suspend fun setPlaybackMaxHeight(height: Int) = Unit
     override val downloadMaxHeightFlow = MutableStateFlow<Int?>(null)
     override suspend fun setDownloadMaxHeight(height: Int?) { downloadMaxHeightFlow.value = height }
@@ -53,6 +58,16 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun setPlayerBoostSpeed(speed: Float) = Unit
     override val clipAutoExtendFlow = MutableStateFlow(true)
     override suspend fun setClipAutoExtend(enabled: Boolean) { clipAutoExtendFlow.value = enabled }
+    override val playerLayoutPrefsFlow = MutableStateFlow(PlayerLayoutPrefs.Default)
+    override suspend fun setPlayerLayoutPrefs(prefs: PlayerLayoutPrefs) { playerLayoutPrefsFlow.value = prefs.sanitize() }
+    override val driveAppearancePrefsFlow = MutableStateFlow(DriveAppearancePrefs.DEFAULT)
+    override suspend fun setDriveAppearancePrefs(prefs: DriveAppearancePrefs) { driveAppearancePrefsFlow.value = prefs }
+    override val skipFeedExitConfirmFlow = MutableStateFlow(false)
+    override suspend fun setSkipFeedExitConfirm(skip: Boolean) { skipFeedExitConfirmFlow.value = skip }
+    override val cacheMaxBytesFlow = MutableStateFlow(CachePolicyDefaults.DEFAULT_MAX_BYTES)
+    override suspend fun setCacheMaxBytes(bytes: Long) { cacheMaxBytesFlow.value = bytes.coerceAtLeast(0L) }
+    override val cacheMaxAgeDaysFlow = MutableStateFlow(CachePolicyDefaults.DEFAULT_MAX_AGE_DAYS)
+    override suspend fun setCacheMaxAgeDays(days: Int) { cacheMaxAgeDaysFlow.value = days.coerceAtLeast(0) }
     override val folderMapOpenFlow: Flow<Boolean> = MutableStateFlow(false)
     override suspend fun setFolderMapOpen(open: Boolean) = Unit
     override val folderMapPinnedFlow: Flow<Boolean> = MutableStateFlow(false)
@@ -69,10 +84,14 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun setSettingsSyncEnabled(enabled: Boolean) = Unit
     override val syncPlayHistoryFlow: Flow<Boolean> = MutableStateFlow(false)
     override suspend fun setSyncPlayHistoryEnabled(enabled: Boolean) = Unit
-    override val themeModeFlow: Flow<String?> = MutableStateFlow(null)
-    override suspend fun setThemeMode(mode: String) = Unit
-    override val themeSeedFlow: Flow<String?> = MutableStateFlow(null)
-    override suspend fun setThemeSeed(seed: String?) = Unit
+    override val themeModeFlow = MutableStateFlow<String?>(null)
+    override suspend fun setThemeMode(mode: String) { themeModeFlow.value = mode }
+    override val themeSeedFlow = MutableStateFlow<String?>(null)
+    override suspend fun setThemeSeed(seed: String?) { themeSeedFlow.value = seed }
+    override val pureBlackFlow = MutableStateFlow(false)
+    override suspend fun setPureBlack(enabled: Boolean) { pureBlackFlow.value = enabled }
+    override val einkModeFlow = MutableStateFlow(false)
+    override suspend fun setEinkMode(enabled: Boolean) { einkModeFlow.value = enabled }
     override val driveViewModeFlow: Flow<String> = MutableStateFlow("LIST")
     override suspend fun setDriveViewMode(mode: String) = Unit
     override fun driveTileSizeFlow(view: String): Flow<String> = MutableStateFlow("")
@@ -88,15 +107,33 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun setPikpakDomain(root: String) = Unit
     override val snailModeFlow: Flow<SnailMode> = MutableStateFlow(SnailMode())
     override suspend fun setSnailMode(mode: SnailMode) = Unit
-    private val acceleration = MutableStateFlow(true)
-    override val concurrentAccelerationFlow: Flow<Boolean> = acceleration
-    override val concurrentConnectionsFlow: Flow<Int> = acceleration.map { if (it) 4 else 1 }
+    override val maxConcurrentDownloadsFlow = MutableStateFlow(dev.piko.data.auth.DownloadConcurrencyDefaults.DEFAULT)
+    override suspend fun setMaxConcurrentDownloads(count: Int) {
+        maxConcurrentDownloadsFlow.value = dev.piko.data.auth.DownloadConcurrencyDefaults.sanitize(count)
+    }
+    override val clipVolumeFlow = MutableStateFlow(1f)
+    override val clipMutedFlow = MutableStateFlow(false)
+    override suspend fun setClipAudio(volume: Float, muted: Boolean) {
+        clipVolumeFlow.value = volume.coerceIn(0f, 1f)
+        clipMutedFlow.value = muted
+    }
+    override val motionPreferenceFlow = MutableStateFlow<String?>(null)
+    override suspend fun setMotionPreference(level: String?) { motionPreferenceFlow.value = level }
+    override val predictiveBackFlow = MutableStateFlow(true)
+    override suspend fun setPredictiveBack(enabled: Boolean) { predictiveBackFlow.value = enabled }
+    override val currentSnapshot: dev.piko.data.auth.PikoPreferencesSnapshot
+        get() = dev.piko.data.auth.PikoPreferencesSnapshot(
+            clipVolume = clipVolumeFlow.value,
+            clipMuted = clipMutedFlow.value,
+            motionPreference = motionPreferenceFlow.value,
+            predictiveBack = predictiveBackFlow.value,
+            maxConcurrentDownloads = maxConcurrentDownloadsFlow.value,
+        )
     override val downloadDirPathFlow: Flow<String> = MutableStateFlow("")
     override suspend fun setDownloadDirPath(path: String) = Unit
     override suspend fun getDownloadDirPath(): String = ""
-    override suspend fun setConcurrentAccelerationEnabled(enabled: Boolean) {
-        acceleration.value = enabled
-    }
+    override val askDownloadLocationFlow = MutableStateFlow(false)
+    override suspend fun setAskDownloadLocation(enabled: Boolean) { askDownloadLocationFlow.value = enabled }
     @Volatile var downloadTasks: String = ""
     override suspend fun loadDownloadTasks(): String = downloadTasks
     override suspend fun saveDownloadTasks(serialized: String) {
@@ -126,10 +163,12 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun clearLegacyArchivePasswords() {
         legacyArchivePasswords = ""
     }
-    override val recentMoveTargetsFlow: Flow<String> = MutableStateFlow("")
-    override suspend fun saveRecentMoveTargets(serialized: String) = Unit
-    override val pinnedFoldersFlow: Flow<String> = MutableStateFlow("")
-    override suspend fun savePinnedFolders(serialized: String) = Unit
+    private val recentMoveTargets = MutableStateFlow("")
+    override val recentMoveTargetsFlow: Flow<String> = recentMoveTargets
+    override suspend fun saveRecentMoveTargets(serialized: String) { recentMoveTargets.value = serialized }
+    private val pinnedFolders = MutableStateFlow("")
+    override val pinnedFoldersFlow: Flow<String> = pinnedFolders
+    override suspend fun savePinnedFolders(serialized: String) { pinnedFolders.value = serialized }
     private val perFolderSort = MutableStateFlow(false)
     override val perFolderSortFlow: Flow<Boolean> = perFolderSort
     override suspend fun setPerFolderSort(enabled: Boolean) { perFolderSort.value = enabled }
@@ -148,8 +187,24 @@ class MemoryPreferences : PikoUserPreferences {
     override suspend fun setIgnoredUpdateVersion(version: String) = Unit
     override val metaTubeUrlFlow = MutableStateFlow("")
     override suspend fun setMetaTubeUrl(url: String) { metaTubeUrlFlow.value = url }
+    private val metaTubeUrlsByAccount = ConcurrentHashMap<String, MutableStateFlow<String>>()
+    override fun metaTubeUrlFlowFor(account: String): Flow<String> =
+        if (account.isBlank()) MutableStateFlow("") else metaTubeUrlsByAccount.computeIfAbsent(account) { MutableStateFlow("") }
+    override suspend fun setMetaTubeUrlFor(account: String, url: String) {
+        if (account.isNotBlank()) {
+            metaTubeUrlsByAccount.computeIfAbsent(account) { MutableStateFlow("") }.value = url
+        }
+    }
     override val metaTubeTokenFlow = MutableStateFlow("")
     override suspend fun setMetaTubeToken(token: String) { metaTubeTokenFlow.value = token }
+    private val metaTubeTokensByAccount = ConcurrentHashMap<String, MutableStateFlow<String>>()
+    override fun metaTubeTokenFlowFor(account: String): Flow<String> =
+        if (account.isBlank()) MutableStateFlow("") else metaTubeTokensByAccount.computeIfAbsent(account) { MutableStateFlow("") }
+    override suspend fun setMetaTubeTokenFor(account: String, token: String) {
+        if (account.isNotBlank()) {
+            metaTubeTokensByAccount.computeIfAbsent(account) { MutableStateFlow("") }.value = token
+        }
+    }
 }
 
 /** 内存会话存储，行为与两端的实现一致：会话、上次账号、密码三份各自独立。 */
@@ -177,6 +232,14 @@ class MemorySessionStore : PikoSessionStore {
     override suspend fun clearCredentials(account: String) {
         passwords.remove(account)
     }
+    val syncSecrets = ConcurrentHashMap<String, String>()
+    override suspend fun loadSyncSecret(account: String): String? = syncSecrets[account]
+    override suspend fun saveSyncSecret(account: String, secret: String) {
+        if (secret.isEmpty()) syncSecrets.remove(account) else syncSecrets[account] = secret
+    }
+    override suspend fun clearSyncSecret(account: String) {
+        syncSecrets.remove(account)
+    }
     val archivePasswords = ConcurrentHashMap<String, String>()
     override suspend fun loadArchivePasswords(account: String): String = archivePasswords[account].orEmpty()
     override suspend fun saveArchivePasswords(account: String, serialized: String) {
@@ -188,14 +251,24 @@ class MemorySessionStore : PikoSessionStore {
  * 呈现状态与断言在同一个串行作用域执行，贴近生产环境的 Main 读写约束。
  * 仓库、SDK 与下载的 IO 仍在真实 Default/IO 调度器上运行，不使用虚拟时间。
  */
+private val smokeLogDirectory by lazy { java.nio.file.Files.createTempDirectory("piko-smoke-log").toString() }
+
 fun smoke(block: suspend CoroutineScope.(scope: CoroutineScope) -> Unit) {
-    val presentationDispatcher = Dispatchers.Default.limitedParallelism(1)
-    runBlocking(presentationDispatcher) {
-        val scope = CoroutineScope(SupervisorJob() + presentationDispatcher)
-        try {
-            withTimeout(30_000) { block(scope) }
-        } finally {
-            scope.cancel()
+    dev.piko.shared.log.PikoLog.install(smokeLogDirectory)
+    java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "piko-smoke-presentation").apply { isDaemon = true }
+    }.asCoroutineDispatcher().use { presentationDispatcher ->
+        runBlocking(presentationDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + presentationDispatcher)
+            try {
+                withTimeout(30_000) { block(scope) }
+            } catch (error: Throwable) {
+                val logs = kotlinx.coroutines.withTimeoutOrNull(2_000) { dev.piko.shared.log.PikoLog.export() }
+                System.err.println(logs?.lines()?.takeLast(40)?.joinToString("\n"))
+                throw error
+            } finally {
+                withTimeout(30_000) { scope.coroutineContext[kotlinx.coroutines.Job]!!.cancelAndJoin() }
+            }
         }
     }
 }

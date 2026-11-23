@@ -24,7 +24,7 @@ import java.nio.file.Path
 object PikoHome {
     private class Resolved(val root: Path, val isDefault: Boolean, val portableFallback: PortableFallback? = null)
 
-    /** 便携目录 [portableData] 写不进，数据改放在了 [root]。[problem] 是写入失败的异常，可能带路径，不进日志。 */
+    /** 便携目录 [portableData] 写不进，数据改放在了 [root]。[problem] 为写入探测异常（含本机或 UNC 路径，落盘经 PikoLog.redact 脱敏）。 */
     class PortableFallback(val portableData: Path, val problem: Throwable)
 
     private val resolved: Resolved by lazy { resolve() }
@@ -53,6 +53,38 @@ object PikoHome {
     val instanceSocket: Path
         get() = if (resolved.isDefault) root.resolve("instance.sock")
         else Path.of(System.getProperty("java.io.tmpdir"), "piko$secretNamespace.sock")
+
+    /**
+     * Windows 默认安装版把稀疏下载暂存放在 `%LOCALAPPDATA%\PikoCache\download-cache`（与安装目录
+     * `%LOCALAPPDATA%\Piko` 分开），避免与 `%USERPROFILE%\.piko` 内的设置/缓存 JSON 更新混杂触发安全软件误报；
+     * 指定 `piko.home`（开发版/测试/AOT 训练）、Windows 便携版以及 macOS/Linux 沿用 [root]/download-cache。
+     */
+    val downloadCacheRoot: Path by lazy {
+        resolveDownloadCacheRoot(
+            isDefault = resolved.isDefault,
+            root = root,
+            osName = System.getProperty("os.name") ?: "",
+            localAppData = System.getenv("LOCALAPPDATA"),
+            overridePath = System.getProperty("piko.download-cache")?.takeIf { it.isNotBlank() }
+                ?: System.getenv("PIKO_DOWNLOAD_CACHE")?.takeIf { it.isNotBlank() },
+        )
+    }
+
+    fun resolveDownloadCacheRoot(
+        isDefault: Boolean,
+        root: Path,
+        osName: String,
+        localAppData: String?,
+        overridePath: String?,
+    ): Path {
+        overridePath?.takeIf { it.isNotBlank() }?.let {
+            return Path.of(it).toAbsolutePath().normalize()
+        }
+        if (isDefault && osName.startsWith("Windows", ignoreCase = true) && !localAppData.isNullOrBlank()) {
+            return Path.of(localAppData, "PikoCache", "download-cache").toAbsolutePath().normalize()
+        }
+        return root.resolve("download-cache")
+    }
 
     private fun resolve(): Resolved {
         System.getProperty("piko.home")?.takeIf { it.isNotBlank() }?.let {

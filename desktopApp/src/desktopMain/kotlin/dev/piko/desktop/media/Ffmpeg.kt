@@ -1,11 +1,10 @@
 package dev.piko.desktop.media
 
-import dev.piko.shared.i18n.tr
-
 import java.io.File
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
 import java.lang.foreign.Linker
+import java.lang.foreign.MemoryLayout
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout.ADDRESS
@@ -18,7 +17,7 @@ import java.lang.invoke.MethodHandle
  * mpv 运行库里随带的 FFmpeg，经 FFM 直调做流复制转封装，以及本地媒体探测和缩略图解码。
  *
  * 结构体字段按偏移读写（[FfmpegLayout]），偏移取自 FFmpeg 8.0.1 的头文件。FFmpeg 只在主版本号变化时改动公开结构体
- * 已有字段的位置，所以载入时核对三个库的主版本，对不上就拒绝，而不是读错内存。mpv 运行库升级时按 desktopApp/CLAUDE.md 核对。
+ * 已有字段的位置，所以载入时核对四个库的主版本，对不上就拒绝，而不是读错内存。mpv 运行库升级时按 desktopApp/AGENTS.md 核对。
  *
  * 不用 JavaCV 一类的现成绑定：它们自带一份 FFmpeg，安装包要再多几十 MB，mpv 运行库里已有一份完整的。
  */
@@ -26,7 +25,7 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
     private val linker = Linker.nativeLinker()
 
     private fun SymbolLookup.function(name: String, descriptor: FunctionDescriptor): MethodHandle =
-        linker.downcallHandle(find(name).orElseThrow { FfmpegException("FFmpeg 缺少函数 $name") }, descriptor)
+        linker.downcallHandle(find(name).orElseThrow { FfmpegException("Missing FFmpeg symbol: $name") }, descriptor)
 
     val avutilVersion = avutil.function("avutil_version", FunctionDescriptor.of(JAVA_INT))
     val avcodecVersion = avcodec.function("avcodec_version", FunctionDescriptor.of(JAVA_INT))
@@ -49,16 +48,19 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
     val sideDataGet = avcodec.function("av_packet_side_data_get", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, JAVA_INT))
     val frameAlloc = avutil.function("av_frame_alloc", FunctionDescriptor.of(ADDRESS))
     val frameFree = avutil.function("av_frame_free", FunctionDescriptor.ofVoid(ADDRESS))
+    val frameUnref = avutil.function("av_frame_unref", FunctionDescriptor.ofVoid(ADDRESS))
     val decoderAlloc = avcodec.function("avcodec_alloc_context3", FunctionDescriptor.of(ADDRESS, ADDRESS))
     val decoderFree = avcodec.function("avcodec_free_context", FunctionDescriptor.ofVoid(ADDRESS))
     val parametersToContext = avcodec.function("avcodec_parameters_to_context", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS))
     val decoderOpen = avcodec.function("avcodec_open2", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS))
+    val flushBuffers = avcodec.function("avcodec_flush_buffers", FunctionDescriptor.ofVoid(ADDRESS))
     val sendPacket = avcodec.function("avcodec_send_packet", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS))
     val receiveFrame = avcodec.function("avcodec_receive_frame", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS))
 
     val packetAlloc = avcodec.function("av_packet_alloc", FunctionDescriptor.of(ADDRESS))
     val packetFree = avcodec.function("av_packet_free", FunctionDescriptor.ofVoid(ADDRESS))
     val packetUnref = avcodec.function("av_packet_unref", FunctionDescriptor.ofVoid(ADDRESS))
+    val packetNew = avcodec.function("av_new_packet", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))
     val parametersCopy = avcodec.function("avcodec_parameters_copy", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS))
 
     val allocContext = avformat.function("avformat_alloc_context", FunctionDescriptor.of(ADDRESS))
@@ -99,7 +101,7 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
         for ((name, version, expected) in versions) {
             val major = (version.invokeWithArguments() as Int) ushr 16
             if (major != expected) {
-                throw FfmpegException("$name 的主版本是 $major，转封装按 $expected 的结构体布局编写")
+                throw FfmpegException("Incompatible $name major version $major (expected $expected)")
             }
         }
     }
@@ -108,11 +110,11 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
     fun describe(code: Int): String = Arena.ofConfined().use { arena ->
         val buffer = arena.allocate(256)
         val found = strerror.invokeWithArguments(code, buffer, 256L) as Int
-        if (found < 0) tr("错误码 $code", "Error code $code", "エラーコード $code", "오류 코드 $code", "錯誤碼 $code") else buffer.getString(0)
+        if (found < 0) "error code $code" else buffer.getString(0)
     }
 
     fun check(code: Int, what: String): Int {
-        if (code < 0) throw FfmpegException(tr("$what 失败：${describe(code)}", "$what failed: ${describe(code)}", "$what に失敗：${describe(code)}", "$what 실패: ${describe(code)}", "$what 失敗：${describe(code)}"))
+        if (code < 0) throw FfmpegException("$what failed: ${describe(code)}")
         return code
     }
 
@@ -122,7 +124,7 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
         const val AVFORMAT_MAJOR = 62
 
         /**
-         * 载入 [directory] 里的三个库。各系统的文件名与 mpv 运行库的打包方式一致：Windows 是带主版本号的 DLL，
+         * 载入 [directory] 里的四个库。各系统的文件名与 mpv 运行库的打包方式一致：Windows 是带主版本号的 DLL，
          * Linux 取 SONAME（bundledAppResources 只留这一份），macOS 取带主版本号的 dylib。依赖都在同一目录：
          * Linux 的库带 `$ORIGIN` 的 RUNPATH，macOS 的依赖写的是 `@loader_path`，Windows 经 [WindowsDllLoader] 指定。
          */
@@ -134,7 +136,7 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
                 else -> listOf("libavutil.so.$AVUTIL_MAJOR", "libavcodec.so.$AVCODEC_MAJOR", "libavformat.so.$AVFORMAT_MAJOR", "libswscale.so.9")
             }
             val files = names.map { name ->
-                directory.resolve(name).takeIf { it.isFile } ?: throw FfmpegException("找不到 FFmpeg 库 $name")
+                directory.resolve(name).takeIf { it.isFile } ?: throw FfmpegException("FFmpeg library not found: $name")
             }
             if (os.startsWith("Windows")) files.forEach(WindowsDllLoader::load)
             val (avutil, avcodec, avformat, swscale) = files.map { SymbolLookup.libraryLookup(it.toPath(), Arena.global()) }
@@ -144,7 +146,7 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
         private val bundledResult: Result<Ffmpeg> by lazy {
             runCatching {
                 val resources = System.getProperty("compose.application.resources.dir")
-                    ?: throw FfmpegException("没有应用资源目录，找不到 FFmpeg")
+                    ?: throw FfmpegException("Application resources directory is not configured; cannot locate bundled FFmpeg")
                 load(File(resources, "mpv"))
             }
         }
@@ -154,32 +156,42 @@ internal class Ffmpeg private constructor(avutil: SymbolLookup, avcodec: SymbolL
     }
 }
 
-internal class FfmpegException(message: String) : Exception(message)
+internal class FfmpegException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /**
- * Windows 上按完整路径载入 DLL 时，系统只在程序目录、系统目录与 PATH 里找它的依赖，不找它所在的目录；
+ * Windows 上按完整路径载入 DLL 时，系统默认只在程序目录、系统目录与 PATH 里找它的依赖，不找它所在的目录；
  * avformat 依赖同目录的 avcodec、zlib 等，SymbolLookup.libraryLookup 直接载会报找不到模块。
- * 先以 LOAD_WITH_ALTERED_SEARCH_PATH 载一次，依赖就从 DLL 所在目录找；之后 libraryLookup 拿到的是已载入的同一个模块。
+ * 先以 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 载一次，把依赖搜索限定在 DLL 所在目录与
+ * System32（同时避免从未知当前目录或 PATH 查找）；之后 libraryLookup 拿到的是已载入的同一个模块。
  * 不靠 mediamp 设的 SetDllDirectoryW：转封装可能先于播放器用到这些库，测试进程里也没有它。
  */
 private object WindowsDllLoader {
-    private const val LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+    private const val LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x00000100
+    private const val LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
+    private const val LOAD_FLAGS = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR or LOAD_LIBRARY_SEARCH_SYSTEM32
+    private val callStateLayout = Linker.Option.captureStateLayout()
+    private val lastErrorOffset = callStateLayout.byteOffset(MemoryLayout.PathElement.groupElement("GetLastError"))
 
     private val loadLibraryEx: MethodHandle by lazy {
         val kernel32 = SymbolLookup.libraryLookup("kernel32", Arena.global())
         Linker.nativeLinker().downcallHandle(
             kernel32.find("LoadLibraryExW").orElseThrow(),
             FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_INT),
+            Linker.Option.captureCallState("GetLastError"),
         )
     }
 
     fun load(file: File) {
         Arena.ofConfined().use { arena ->
-            val path = file.absolutePath + "\u0000"
+            val capturedState = arena.allocate(callStateLayout)
+            val path = file.canonicalFile.absolutePath + "\u0000"
             val wide = arena.allocate(path.length * 2L)
             path.forEachIndexed { index, char -> wide.setAtIndex(JAVA_CHAR, index.toLong(), char) }
-            val module = loadLibraryEx.invokeWithArguments(wide, MemorySegment.NULL, LOAD_WITH_ALTERED_SEARCH_PATH) as MemorySegment
-            if (module == MemorySegment.NULL) throw FfmpegException("无法载入 ${file.name}")
+            val module = loadLibraryEx.invokeWithArguments(capturedState, wide, MemorySegment.NULL, LOAD_FLAGS) as MemorySegment
+            if (module == MemorySegment.NULL) {
+                val lastError = capturedState.get(JAVA_INT, lastErrorOffset)
+                throw FfmpegException("Failed to load ${file.name} (Win32 error $lastError)")
+            }
         }
     }
 }
@@ -231,6 +243,8 @@ internal object FfmpegLayout {
     // AVPacket
     const val PACKET_PTS = 8L
     const val PACKET_DTS = 16L
+    const val PACKET_DATA = 24L
+    const val PACKET_DATA_SIZE = 32L
     const val PACKET_STREAM_INDEX = 36L
     const val PACKET_FLAGS = 40L
     const val PACKET_DURATION = 64L
@@ -243,6 +257,7 @@ internal object FfmpegLayout {
 
     const val AVMEDIA_TYPE_VIDEO = 0
     const val AVMEDIA_TYPE_AUDIO = 1
+    const val AV_CODEC_ID_H264 = 27
     const val AV_CODEC_ID_HEVC = 173
     const val AV_DISPOSITION_ATTACHED_PIC = 0x400
     const val AV_PKT_FLAG_KEY = 1

@@ -15,18 +15,29 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.piko.shared.data.DriveAppearancePrefs
 import dev.piko.shared.log.PikoLog
+import dev.piko.shared.media.player.PlayerLayoutPrefs
+import dev.piko.shared.media.player.SubtitleStylePrefs
+import dev.piko.shared.media.player.decodePlayerLayoutPrefs
+import dev.piko.shared.media.player.encodePlayerLayoutPrefs
 import dev.piko.shared.net.ProxySetting
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.runBlocking
 
 // 文件损坏时整份重置而不是抛 CorruptionException：首读发生在 appScope 的恢复登录里，
 // 那里抛出的异常没有人接，结果是每次冷启动都崩，只能清数据
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
     name = "piko_preferences",
-    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    corruptionHandler = ReplaceFileCorruptionHandler { ex ->
+        PikoLog.e(TAG, "DataStore piko_preferences corrupted; resetting to empty preferences", ex)
+        emptyPreferences()
+    },
 )
 
 /** 1.1.0 全机一份的解压密码，明文。之后按账号存在 AndroidPikoSessionStore，这里只在迁移时读。 */
@@ -40,14 +51,20 @@ private const val TAG = "Preferences"
  */
 private val Context.playbackDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "piko_playback",
-    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    corruptionHandler = ReplaceFileCorruptionHandler { ex ->
+        PikoLog.e(TAG, "DataStore piko_playback corrupted; resetting to empty preferences", ex)
+        emptyPreferences()
+    },
     produceMigrations = { context -> listOf(LegacyPlaybackPositionMigration(context.dataStore)) },
 )
 
 /** 下载任务表同理单独一个文件：整张表一个键，随任务数增长，每次状态变化都整份重写。 */
 private val Context.downloadsDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "piko_downloads",
-    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    corruptionHandler = ReplaceFileCorruptionHandler { ex ->
+        PikoLog.e(TAG, "DataStore piko_downloads corrupted; resetting to empty preferences", ex)
+        emptyPreferences()
+    },
 )
 
 private val DOWNLOAD_TASKS = stringPreferencesKey("download_tasks")
@@ -89,20 +106,100 @@ private class LegacyPlaybackPositionMigration(
 }
 
 class SessionManager(private val context: Context) : PikoUserPreferences {
+    @Volatile
+    private var cachedMainPreferences: Preferences? = null
+    private val mainDataFlow: Flow<Preferences> = context.dataStore.data.onEach { cachedMainPreferences = it }
+    private val playbackCacheLock = Any()
+    private val lastSavedPlaybackPositions = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>): Boolean = size > 512
+    }
+    @Volatile
+    private var lastSavedDownloadTasks: String? = null
+    @Volatile
+    private var lastSavedUploadTasks: String? = null
+    @Volatile
+    private var lastSavedOfflinePacks: String? = null
+
+    internal fun preloadMainPreferences(): Preferences =
+        cachedMainPreferences ?: runBlocking { mainDataFlow.first() }.also { cachedMainPreferences = it }
+
+    internal fun currentAppLanguage(): AppLanguage =
+        AppLanguage.fromStorage(preloadMainPreferences()[appLanguageKey])
+
+    internal fun currentProxySetting(): ProxySetting =
+        ProxySetting.decode(preloadMainPreferences()[PreferencesKeys.PROXY_SETTING].orEmpty())
+
+    internal fun currentHardwareDecoding(): Boolean =
+        preloadMainPreferences()[PreferencesKeys.HARDWARE_DECODING] ?: true
+
+    override val currentSnapshot: PikoPreferencesSnapshot
+        get() {
+            val prefs = cachedMainPreferences ?: return PikoPreferencesSnapshot()
+            val driveView = prefs[PreferencesKeys.DRIVE_VIEW_MODE]
+                ?: if (prefs[PreferencesKeys.WATERFALL_VIEW_ENABLED] ?: true) "POSTER" else "LIST"
+            val tileSizes = buildMap<String, String> {
+                for ((key, value) in prefs.asMap()) {
+                    val name = key.name
+                    if (name.startsWith("drive_tile_size_") && value is String) {
+                        put(name.removePrefix("drive_tile_size_"), value)
+                    }
+                }
+            }
+            val rawSeed = prefs[PreferencesKeys.THEME_SEED]
+            val legacyEink = rawSeed.equals("EINK", ignoreCase = true)
+            val motionPref = prefs[PreferencesKeys.MOTION_PREFERENCE]?.takeIf { it.isNotBlank() }
+                ?: if (prefs[PreferencesKeys.REDUCE_MOTION] == true) "Reduced" else null
+            return PikoPreferencesSnapshot(
+                appLanguage = AppLanguage.fromStorage(prefs[appLanguageKey]),
+                themeMode = prefs[PreferencesKeys.THEME_MODE],
+                themeSeed = rawSeed?.takeUnless { it.equals("EINK", ignoreCase = true) },
+                pureBlack = prefs[PreferencesKeys.PURE_BLACK] ?: false,
+                einkMode = prefs[PreferencesKeys.EINK_MODE] ?: legacyEink,
+                spoilerBlurEnabled = prefs[PreferencesKeys.SPOILER_BLUR_ENABLED] ?: false,
+                reduceMotion = motionPref.equals("Reduced", ignoreCase = true),
+                motionPreference = motionPref,
+                predictiveBack = prefs[PreferencesKeys.PREDICTIVE_BACK] ?: true,
+                maxConcurrentDownloads = DownloadConcurrencyDefaults.sanitize(prefs[PreferencesKeys.MAX_CONCURRENT_DOWNLOADS]),
+                hardwareDecoding = prefs[PreferencesKeys.HARDWARE_DECODING] ?: true,
+                playbackMaxHeight = prefs[PreferencesKeys.PLAYBACK_MAX_HEIGHT] ?: PlayerGestureDefaults.PLAYBACK_AUTO_HEIGHT,
+                driveViewMode = driveView,
+                galleryShowImages = prefs[PreferencesKeys.GALLERY_SHOW_IMAGES] ?: true,
+                sidebarCollapsed = prefs[PreferencesKeys.SIDEBAR_COLLAPSED] ?: false,
+                showExtensions = prefs[PreferencesKeys.SHOW_EXTENSIONS] ?: false,
+                proxySetting = ProxySetting.decode(prefs[PreferencesKeys.PROXY_SETTING].orEmpty()),
+                tileSizes = tileSizes,
+                playerLayout = decodePlayerLayoutPrefs(prefs[PreferencesKeys.PLAYER_LAYOUT]),
+                subtitleStyle = SubtitleStylePrefs.decodeJson(prefs[PreferencesKeys.SUBTITLE_STYLE]),
+                driveAppearance = DriveAppearancePrefs.decodeJson(prefs[PreferencesKeys.DRIVE_APPEARANCE]),
+                skipFeedExitConfirm = prefs[PreferencesKeys.SKIP_FEED_EXIT_CONFIRM] ?: false,
+                cacheMaxBytes = (prefs[PreferencesKeys.CACHE_MAX_BYTES] ?: CachePolicyDefaults.DEFAULT_MAX_BYTES).coerceAtLeast(0L),
+                cacheMaxAgeDays = (prefs[PreferencesKeys.CACHE_MAX_AGE_DAYS] ?: CachePolicyDefaults.DEFAULT_MAX_AGE_DAYS).coerceAtLeast(0),
+                askDownloadLocation = prefs[PreferencesKeys.ASK_DOWNLOAD_LOCATION] ?: true,
+                clipVolume = prefs[PreferencesKeys.CLIP_VOLUME]?.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 1f,
+                clipMuted = prefs[PreferencesKeys.CLIP_MUTED] ?: false,
+            )
+        }
+
+    override fun currentTileSize(view: String): String =
+        cachedMainPreferences?.get(PreferencesKeys.driveTileSize(view)).orEmpty()
+
     private val appLanguageKey = stringPreferencesKey("app_language")
     override val appLanguageFlow: Flow<AppLanguage> = preference { AppLanguage.fromStorage(it[appLanguageKey]) }
     override suspend fun setAppLanguage(language: AppLanguage) {
-        context.dataStore.edit { it[appLanguageKey] = language.tag }
+        cachedMainPreferences = context.dataStore.edit { it[appLanguageKey] = language.tag }
     }
 
     private object PreferencesKeys {
         val SAVE_AS_REFERENCE = booleanPreferencesKey("save_as_reference")
-        val CONCURRENT_ACCELERATION = booleanPreferencesKey("concurrent_acceleration")
         val DOWNLOAD_DIR_PATH = stringPreferencesKey("download_dir_path")
+        val ASK_DOWNLOAD_LOCATION = booleanPreferencesKey("ask_download_location")
         val SPOILER_BLUR_ENABLED = booleanPreferencesKey("spoiler_blur_enabled")
         val AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
         val AUTO_DETECT_CLIPBOARD_LINKS = booleanPreferencesKey("auto_detect_clipboard_links")
         val REDUCE_MOTION = booleanPreferencesKey("reduce_motion")
+        val MOTION_PREFERENCE = stringPreferencesKey("motion_preference")
+        val PREDICTIVE_BACK = booleanPreferencesKey("predictive_back")
+        val MAX_CONCURRENT_DOWNLOADS = intPreferencesKey("max_concurrent_downloads")
         val HARDWARE_DECODING = booleanPreferencesKey("hardware_decoding")
         val PLAYBACK_MAX_HEIGHT = intPreferencesKey("playback_max_height")
         // 不沿用开发期的 download_max_height：那时它只是对话框的默认选中，存过的值换到新语义就成了「不再询问」
@@ -110,6 +207,14 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         val PLAYER_SEEK_STEP_SECONDS = intPreferencesKey("player_seek_step_seconds")
         val PLAYER_BOOST_SPEED = floatPreferencesKey("player_boost_speed")
         val CLIP_AUTO_EXTEND = booleanPreferencesKey("clip_auto_extend")
+        val CLIP_VOLUME = floatPreferencesKey("clip_volume")
+        val CLIP_MUTED = booleanPreferencesKey("clip_muted")
+        val PLAYER_LAYOUT = stringPreferencesKey("player_layout")
+        val SUBTITLE_STYLE = stringPreferencesKey("subtitle_style")
+        val DRIVE_APPEARANCE = stringPreferencesKey("drive_appearance")
+        val SKIP_FEED_EXIT_CONFIRM = booleanPreferencesKey("skip_feed_exit_confirm")
+        val CACHE_MAX_BYTES = longPreferencesKey("cache_max_bytes")
+        val CACHE_MAX_AGE_DAYS = intPreferencesKey("cache_max_age_days")
         val FOLDER_MAP_OPEN = booleanPreferencesKey("folder_map_open")
         val FOLDER_MAP_PINNED = booleanPreferencesKey("folder_map_pinned")
         val HEURISTIC_FILTER_ENABLED = booleanPreferencesKey("heuristic_filter_enabled")
@@ -131,6 +236,8 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         val SNAIL_UPLOAD_KIBPS = intPreferencesKey("snail_upload_kibps")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val THEME_SEED = stringPreferencesKey("theme_seed")
+        val PURE_BLACK = booleanPreferencesKey("pure_black")
+        val EINK_MODE = booleanPreferencesKey("eink_mode")
         val LAST_FOLDER_ID = stringPreferencesKey("last_folder_id")
         val LAST_FOLDER_NAME = stringPreferencesKey("last_folder_name")
         val LAST_FOLDER_STACK_SERIALIZED = stringPreferencesKey("last_folder_stack")
@@ -148,25 +255,39 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         val IGNORED_UPDATE_VERSION = stringPreferencesKey("ignored_update_version")
         val METATUBE_URL = stringPreferencesKey("metatube_url")
         val METATUBE_TOKEN = stringPreferencesKey("metatube_token")
+        fun metaTubeUrlFor(account: String) = stringPreferencesKey("metatube_url_${accountPreferenceKey(account)}")
+        fun metaTubeTokenFor(account: String) = stringPreferencesKey("metatube_token_${accountPreferenceKey(account)}")
     }
 
     /**
-     * 每个 DataStore 值都从同一份 data 流映射出来，任何一个键的写入都会让所有映射重新发射。
-     * 不去重的话，播放器每 5 秒写一次进度，网盘列表、下载存储、设置页的收集者就跟着每 5 秒
-     * 醒一次。
+     * 主偏好 DataStore 的各个设置项都从同一份 data 流映射出来，任一偏好键写入都会让整份 Preferences 重新发射；
+     * 加上 distinctUntilChanged 后，修改单个设置不会无谓唤醒其余无关收集者。
+     * （高频续播进度与传输任务表已分别拆入独立的 playbackDataStore 与 downloadsDataStore。）
      */
     private fun <T> preference(read: (Preferences) -> T): Flow<T> =
-        context.dataStore.data.map(read).distinctUntilChanged()
+        mainDataFlow.map(read).distinctUntilChanged()
 
     override suspend fun savePlaybackPosition(fileId: String, positionMs: Long) {
+        val unchanged = synchronized(playbackCacheLock) { lastSavedPlaybackPositions[fileId] == positionMs }
+        if (unchanged) return
         context.playbackDataStore.edit { preferences ->
-            preferences[playbackKey(fileId)] = positionMs
+            val key = playbackKey(fileId)
+            if (preferences[key] != positionMs) {
+                preferences[key] = positionMs
+            }
+        }
+        synchronized(playbackCacheLock) {
+            lastSavedPlaybackPositions[fileId] = positionMs
         }
     }
 
     override suspend fun getPlaybackPosition(fileId: String): Long {
         val prefs = context.playbackDataStore.data.first()
-        return prefs[playbackKey(fileId)] ?: 0L
+        val position = prefs[playbackKey(fileId)] ?: 0L
+        synchronized(playbackCacheLock) {
+            lastSavedPlaybackPositions[fileId] = position
+        }
+        return position
     }
 
     override suspend fun saveLastFolder(folderId: String, folderName: String, stackSerialized: String) {
@@ -187,11 +308,11 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     }
 
     override val spoilerBlurFlow: Flow<Boolean> = preference { preferences ->
-        preferences[PreferencesKeys.SPOILER_BLUR_ENABLED] ?: true // 默认开启 Spoiler 遮蔽
+        preferences[PreferencesKeys.SPOILER_BLUR_ENABLED] ?: false
     }
 
     override suspend fun setSpoilerBlurEnabled(enabled: Boolean) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.SPOILER_BLUR_ENABLED] = enabled
         }
     }
@@ -212,26 +333,70 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         }
     }
 
-    override val reduceMotionFlow: Flow<Boolean> = preference { it[PreferencesKeys.REDUCE_MOTION] ?: false }
+    override val reduceMotionFlow: Flow<Boolean> = preference {
+        val motion = it[PreferencesKeys.MOTION_PREFERENCE]?.takeIf { s -> s.isNotBlank() }
+        if (motion != null) motion.equals("Reduced", ignoreCase = true) else (it[PreferencesKeys.REDUCE_MOTION] ?: false)
+    }
 
     override suspend fun setReduceMotion(enabled: Boolean) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.REDUCE_MOTION] = enabled
+            if (enabled) {
+                preferences[PreferencesKeys.MOTION_PREFERENCE] = "Reduced"
+            } else if (preferences[PreferencesKeys.MOTION_PREFERENCE].equals("Reduced", ignoreCase = true)) {
+                preferences.remove(PreferencesKeys.MOTION_PREFERENCE)
+            }
+        }
+    }
+
+    override val motionPreferenceFlow: Flow<String?> = preference {
+        it[PreferencesKeys.MOTION_PREFERENCE]?.takeIf { s -> s.isNotBlank() }
+            ?: if (it[PreferencesKeys.REDUCE_MOTION] == true) "Reduced" else null
+    }
+
+    override suspend fun setMotionPreference(style: String?) {
+        val cleaned = style?.trim()?.takeIf { it.isNotEmpty() }
+        val isReduced = cleaned.equals("Reduced", ignoreCase = true)
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            if (cleaned == null) preferences.remove(PreferencesKeys.MOTION_PREFERENCE)
+            else preferences[PreferencesKeys.MOTION_PREFERENCE] = cleaned
+            preferences[PreferencesKeys.REDUCE_MOTION] = isReduced
+        }
+    }
+
+    override val predictiveBackFlow: Flow<Boolean> = preference { it[PreferencesKeys.PREDICTIVE_BACK] ?: true }
+
+    override suspend fun setPredictiveBack(enabled: Boolean) {
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PREDICTIVE_BACK] = enabled
+        }
+    }
+
+    override val maxConcurrentDownloadsFlow: Flow<Int> = preference {
+        DownloadConcurrencyDefaults.sanitize(it[PreferencesKeys.MAX_CONCURRENT_DOWNLOADS])
+    }
+
+    override suspend fun setMaxConcurrentDownloads(count: Int) {
+        val clamped = DownloadConcurrencyDefaults.sanitize(count)
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.MAX_CONCURRENT_DOWNLOADS] = clamped
         }
     }
 
     override val hardwareDecodingFlow: Flow<Boolean> = preference { it[PreferencesKeys.HARDWARE_DECODING] ?: true }
 
     override suspend fun setHardwareDecoding(enabled: Boolean) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.HARDWARE_DECODING] = enabled
         }
     }
 
-    override val playbackMaxHeightFlow: Flow<Int> = preference { it[PreferencesKeys.PLAYBACK_MAX_HEIGHT] ?: 0 }
+    override val playbackMaxHeightFlow: Flow<Int> = preference {
+        it[PreferencesKeys.PLAYBACK_MAX_HEIGHT] ?: PlayerGestureDefaults.PLAYBACK_AUTO_HEIGHT
+    }
 
     override suspend fun setPlaybackMaxHeight(height: Int) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.PLAYBACK_MAX_HEIGHT] = height
         }
     }
@@ -271,11 +436,84 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         }
     }
 
+    override val clipVolumeFlow: Flow<Float> =
+        preference { it[PreferencesKeys.CLIP_VOLUME]?.takeIf { v -> v.isFinite() }?.coerceIn(0f, 1f) ?: 1f }
+
+    override val clipMutedFlow: Flow<Boolean> =
+        preference { it[PreferencesKeys.CLIP_MUTED] ?: false }
+
+    override suspend fun setClipAudio(volume: Float, muted: Boolean) {
+        val clamped = if (volume.isFinite()) volume.coerceIn(0f, 1f) else 1f
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.CLIP_VOLUME] = clamped
+            preferences[PreferencesKeys.CLIP_MUTED] = muted
+        }
+    }
+
+    override val playerLayoutPrefsFlow: Flow<PlayerLayoutPrefs> =
+        preference { decodePlayerLayoutPrefs(it[PreferencesKeys.PLAYER_LAYOUT]) }
+
+    override suspend fun setPlayerLayoutPrefs(prefs: PlayerLayoutPrefs) {
+        val encoded = encodePlayerLayoutPrefs(prefs)
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PLAYER_LAYOUT] = encoded
+        }
+    }
+
+    override val subtitleStylePrefsFlow: Flow<SubtitleStylePrefs> =
+        preference { SubtitleStylePrefs.decodeJson(it[PreferencesKeys.SUBTITLE_STYLE]) }
+
+    override suspend fun setSubtitleStylePrefs(prefs: SubtitleStylePrefs) {
+        val encoded = prefs.sanitize().encodeJson()
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SUBTITLE_STYLE] = encoded
+        }
+    }
+
+    override val driveAppearancePrefsFlow: Flow<DriveAppearancePrefs> =
+        preference { DriveAppearancePrefs.decodeJson(it[PreferencesKeys.DRIVE_APPEARANCE]) }
+
+    override suspend fun setDriveAppearancePrefs(prefs: DriveAppearancePrefs) {
+        val encoded = prefs.encodeJson()
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.DRIVE_APPEARANCE] = encoded
+        }
+    }
+
+    override val skipFeedExitConfirmFlow: Flow<Boolean> =
+        preference { it[PreferencesKeys.SKIP_FEED_EXIT_CONFIRM] ?: false }
+
+    override suspend fun setSkipFeedExitConfirm(skip: Boolean) {
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SKIP_FEED_EXIT_CONFIRM] = skip
+        }
+    }
+
+    override val cacheMaxBytesFlow: Flow<Long> =
+        preference { (it[PreferencesKeys.CACHE_MAX_BYTES] ?: CachePolicyDefaults.DEFAULT_MAX_BYTES).coerceAtLeast(0L) }
+
+    override suspend fun setCacheMaxBytes(bytes: Long) {
+        val clamped = bytes.coerceAtLeast(0L)
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.CACHE_MAX_BYTES] = clamped
+        }
+    }
+
+    override val cacheMaxAgeDaysFlow: Flow<Int> =
+        preference { (it[PreferencesKeys.CACHE_MAX_AGE_DAYS] ?: CachePolicyDefaults.DEFAULT_MAX_AGE_DAYS).coerceAtLeast(0) }
+
+    override suspend fun setCacheMaxAgeDays(days: Int) {
+        val clamped = days.coerceAtLeast(0)
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.CACHE_MAX_AGE_DAYS] = clamped
+        }
+    }
+
     override val galleryShowImagesFlow: Flow<Boolean> =
         preference { it[PreferencesKeys.GALLERY_SHOW_IMAGES] ?: true }
 
     override suspend fun setGalleryShowImages(show: Boolean) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.GALLERY_SHOW_IMAGES] = show
         }
     }
@@ -360,15 +598,39 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     override val themeModeFlow: Flow<String?> = preference { it[PreferencesKeys.THEME_MODE] }
 
     override suspend fun setThemeMode(mode: String) {
-        context.dataStore.edit { it[PreferencesKeys.THEME_MODE] = mode }
+        cachedMainPreferences = context.dataStore.edit { it[PreferencesKeys.THEME_MODE] = mode }
     }
 
-    /** 内置主题的名字，null 表示系统取色。 */
-    override val themeSeedFlow: Flow<String?> = preference { it[PreferencesKeys.THEME_SEED] }
+    /** 内置主题的名字，null 表示系统取色。旧版遗留的 EINK 自动视为未指定种子色并转交 [einkModeFlow]。 */
+    override val themeSeedFlow: Flow<String?> = preference {
+        it[PreferencesKeys.THEME_SEED]?.takeUnless { seed -> seed.equals("EINK", ignoreCase = true) }
+    }
 
     override suspend fun setThemeSeed(seed: String?) {
-        context.dataStore.edit { preferences ->
-            if (seed == null) preferences.remove(PreferencesKeys.THEME_SEED) else preferences[PreferencesKeys.THEME_SEED] = seed
+        val sanitized = seed?.takeUnless { it.equals("EINK", ignoreCase = true) }
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            if (sanitized == null) preferences.remove(PreferencesKeys.THEME_SEED) else preferences[PreferencesKeys.THEME_SEED] = sanitized
+        }
+    }
+
+    override val pureBlackFlow: Flow<Boolean> = preference { it[PreferencesKeys.PURE_BLACK] ?: false }
+
+    override suspend fun setPureBlack(enabled: Boolean) {
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PURE_BLACK] = enabled
+        }
+    }
+
+    override val einkModeFlow: Flow<Boolean> = preference {
+        it[PreferencesKeys.EINK_MODE] ?: it[PreferencesKeys.THEME_SEED].equals("EINK", ignoreCase = true)
+    }
+
+    override suspend fun setEinkMode(enabled: Boolean) {
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.EINK_MODE] = enabled
+            if (preferences[PreferencesKeys.THEME_SEED].equals("EINK", ignoreCase = true)) {
+                preferences.remove(PreferencesKeys.THEME_SEED)
+            }
         }
     }
 
@@ -379,7 +641,7 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     }
 
     override suspend fun setDriveViewMode(mode: String) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.DRIVE_VIEW_MODE] = mode
         }
     }
@@ -387,7 +649,7 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     override fun driveTileSizeFlow(view: String): Flow<String> = preference { it[PreferencesKeys.driveTileSize(view)].orEmpty() }
 
     override suspend fun setDriveTileSize(view: String, size: String) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.driveTileSize(view)] = size
         }
     }
@@ -395,7 +657,7 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     override val sidebarCollapsedFlow: Flow<Boolean> = preference { it[PreferencesKeys.SIDEBAR_COLLAPSED] ?: false }
 
     override suspend fun setSidebarCollapsed(collapsed: Boolean) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.SIDEBAR_COLLAPSED] = collapsed
         }
     }
@@ -403,7 +665,7 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     override val showExtensionsFlow: Flow<Boolean> = preference { it[PreferencesKeys.SHOW_EXTENSIONS] ?: false }
 
     override suspend fun setShowExtensions(show: Boolean) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.SHOW_EXTENSIONS] = show
         }
     }
@@ -451,14 +713,6 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         }
     }
 
-    override val concurrentAccelerationFlow: Flow<Boolean> = preference { preferences ->
-        preferences[PreferencesKeys.CONCURRENT_ACCELERATION] ?: true
-    }
-
-    override val concurrentConnectionsFlow: Flow<Int> = concurrentAccelerationFlow.map { enabled ->
-        if (enabled) 8 else 1
-    }
-
     override val downloadDirPathFlow: Flow<String> = preference { preferences ->
         preferences[PreferencesKeys.DOWNLOAD_DIR_PATH] ?: ""
     }
@@ -474,32 +728,51 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         return prefs[PreferencesKeys.DOWNLOAD_DIR_PATH] ?: ""
     }
 
-    override suspend fun setConcurrentAccelerationEnabled(enabled: Boolean) {
-        context.dataStore.edit { preferences ->
-            preferences[PreferencesKeys.CONCURRENT_ACCELERATION] = enabled
+    override val askDownloadLocationFlow: Flow<Boolean> = preference { preferences ->
+        preferences[PreferencesKeys.ASK_DOWNLOAD_LOCATION] ?: true
+    }
+
+    override suspend fun setAskDownloadLocation(enabled: Boolean) {
+        cachedMainPreferences = context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.ASK_DOWNLOAD_LOCATION] = enabled
         }
     }
 
     override suspend fun loadDownloadTasks(): String =
-        context.downloadsDataStore.data.first()[DOWNLOAD_TASKS].orEmpty()
+        context.downloadsDataStore.data.first()[DOWNLOAD_TASKS].orEmpty().also {
+            if (lastSavedDownloadTasks == null) lastSavedDownloadTasks = it
+        }
 
     override suspend fun saveDownloadTasks(serialized: String) {
+        if (lastSavedDownloadTasks == serialized) return
         context.downloadsDataStore.edit { preferences ->
-            preferences[DOWNLOAD_TASKS] = serialized
+            if (preferences[DOWNLOAD_TASKS] != serialized) {
+                preferences[DOWNLOAD_TASKS] = serialized
+            }
         }
+        lastSavedDownloadTasks = serialized
     }
 
     override suspend fun loadUploadTasks(): String =
-        context.downloadsDataStore.data.first()[UPLOAD_TASKS].orEmpty()
+        context.downloadsDataStore.data.first()[UPLOAD_TASKS].orEmpty().also {
+            if (lastSavedUploadTasks == null) lastSavedUploadTasks = it
+        }
 
     override suspend fun saveUploadTasks(serialized: String) {
+        if (lastSavedUploadTasks == serialized) return
         context.downloadsDataStore.edit { preferences ->
-            preferences[UPLOAD_TASKS] = serialized
+            if (preferences[UPLOAD_TASKS] != serialized) {
+                preferences[UPLOAD_TASKS] = serialized
+            }
         }
+        lastSavedUploadTasks = serialized
     }
 
-    override suspend fun loadUploadCredentials(taskId: String): String? =
-        context.downloadsDataStore.data.first()[uploadCredentialsKey(taskId)]?.let(CredentialCipher::decrypt)
+    override suspend fun loadUploadCredentials(taskId: String): String? {
+        val stored = context.downloadsDataStore.data.first()[uploadCredentialsKey(taskId)] ?: return null
+        return CredentialCipher.decrypt(stored)
+            ?: null.also { PikoLog.w(TAG, "Failed to decrypt upload credentials for task $taskId") }
+    }
 
     // 密钥库不可用时加密抛出、不存明文，由调用方记下；这个会话重启后按凭据过期处理，只是重传
     override suspend fun saveUploadCredentials(taskId: String, serialized: String) {
@@ -516,12 +789,18 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
     }
 
     override suspend fun loadOfflinePacks(): String =
-        context.downloadsDataStore.data.first()[OFFLINE_PACKS].orEmpty()
+        context.downloadsDataStore.data.first()[OFFLINE_PACKS].orEmpty().also {
+            if (lastSavedOfflinePacks == null) lastSavedOfflinePacks = it
+        }
 
     override suspend fun saveOfflinePacks(serialized: String) {
+        if (lastSavedOfflinePacks == serialized) return
         context.downloadsDataStore.edit { preferences ->
-            preferences[OFFLINE_PACKS] = serialized
+            if (preferences[OFFLINE_PACKS] != serialized) {
+                preferences[OFFLINE_PACKS] = serialized
+            }
         }
+        lastSavedOfflinePacks = serialized
     }
 
     override suspend fun loadLegacyArchivePasswords(): String =
@@ -602,7 +881,7 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         preference { ProxySetting.decode(it[PreferencesKeys.PROXY_SETTING].orEmpty()) }
 
     override suspend fun saveProxySetting(setting: ProxySetting) {
-        context.dataStore.edit { preferences ->
+        cachedMainPreferences = context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.PROXY_SETTING] = setting.encode()
         }
     }
@@ -629,9 +908,28 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
         }
     }
 
+    override fun metaTubeUrlFlowFor(account: String): Flow<String> {
+        if (account.isBlank()) return flowOf("")
+        val key = PreferencesKeys.metaTubeUrlFor(account)
+        return preference { it[key].orEmpty() }
+    }
+
+    override suspend fun setMetaTubeUrlFor(account: String, url: String) {
+        if (account.isBlank()) return
+        val key = PreferencesKeys.metaTubeUrlFor(account)
+        context.dataStore.edit { preferences ->
+            if (url.isEmpty()) preferences.remove(key) else preferences[key] = url
+        }
+    }
+
     // 与解压密码同样加密存放；解不开（密钥库被清）当作没填
     override val metaTubeTokenFlow: Flow<String> = preference { it[PreferencesKeys.METATUBE_TOKEN] }.map { stored ->
-        stored?.let(CredentialCipher::decrypt).orEmpty()
+        if (stored.isNullOrEmpty()) {
+            ""
+        } else {
+            CredentialCipher.decrypt(stored)
+                ?: "".also { PikoLog.w(TAG, "Failed to decrypt MetaTube token; treating as unset") }
+        }
     }
 
     // 加密失败时不存，宁可让用户再填一次，也不落明文
@@ -640,11 +938,39 @@ class SessionManager(private val context: Context) : PikoUserPreferences {
             ""
         } else {
             runCatching { CredentialCipher.encrypt(token) }
-                .onFailure { PikoLog.w(TAG, "MetaTube 令牌加密失败，未保存", it) }
+                .onFailure { PikoLog.w(TAG, "Failed to encrypt MetaTube token; skipping save", it) }
                 .getOrNull() ?: return
         }
         context.dataStore.edit { preferences ->
             if (sealed.isEmpty()) preferences.remove(PreferencesKeys.METATUBE_TOKEN) else preferences[PreferencesKeys.METATUBE_TOKEN] = sealed
+        }
+    }
+
+    override fun metaTubeTokenFlowFor(account: String): Flow<String> {
+        if (account.isBlank()) return flowOf("")
+        val key = PreferencesKeys.metaTubeTokenFor(account)
+        return preference { it[key] }.map { stored ->
+            if (stored.isNullOrEmpty()) {
+                ""
+            } else {
+                CredentialCipher.decrypt(stored)
+                    ?: "".also { PikoLog.w(TAG, "Failed to decrypt per-account MetaTube token; treating as unset") }
+            }
+        }
+    }
+
+    override suspend fun setMetaTubeTokenFor(account: String, token: String) {
+        if (account.isBlank()) return
+        val sealed = if (token.isEmpty()) {
+            ""
+        } else {
+            runCatching { CredentialCipher.encrypt(token) }
+                .onFailure { PikoLog.w(TAG, "Failed to encrypt per-account MetaTube token; skipping save", it) }
+                .getOrNull() ?: return
+        }
+        val key = PreferencesKeys.metaTubeTokenFor(account)
+        context.dataStore.edit { preferences ->
+            if (sealed.isEmpty()) preferences.remove(key) else preferences[key] = sealed
         }
     }
 }

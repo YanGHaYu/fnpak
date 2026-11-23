@@ -47,20 +47,21 @@ import io.github.nihildigit.pikpak.FileStat
 
 /** 租约先于子 provider 进入组合，遗忘时则在子 provider 释放之后让出占用。 */
 private class WorkspaceStateLease(val holder: SaveableStateHolder, val key: Long) : RememberObserver {
-    init { synchronized(workspaceStateLeases) { workspaceStateLeases.add(this) } }
+    init { dev.piko.shared.util.withPikoLock(workspaceStateLeasesLock) { workspaceStateLeases.add(this) } }
 
     override fun onRemembered() = Unit
     override fun onForgotten() = release()
     override fun onAbandoned() = release()
 
     private fun release() {
-        val removed = synchronized(workspaceStateLeases) { workspaceStateLeases.remove(this) }
+        val removed = dev.piko.shared.util.withPikoLock(workspaceStateLeasesLock) { workspaceStateLeases.remove(this) }
         if (removed) workspaceStateLeaseVersion++
     }
 }
 
 // 占用立即生效，不随可放弃的组合快照回滚；释放时通知等待槽位重组。
 // 仅保留仍在组合中的槽位，引用匹配避免不同账号或 holder 之间共享占用。
+private val workspaceStateLeasesLock = dev.piko.shared.util.PikoLock()
 private val workspaceStateLeases = mutableListOf<WorkspaceStateLease>()
 private var workspaceStateLeaseVersion by mutableIntStateOf(0)
 
@@ -68,7 +69,7 @@ private var workspaceStateLeaseVersion by mutableIntStateOf(0)
 private fun WorkspaceStateProvider(holder: SaveableStateHolder, key: Long, content: @Composable () -> Unit) {
     val lease = remember(holder, key) { WorkspaceStateLease(holder, key) }
     val owner = remember(holder, key, workspaceStateLeaseVersion) {
-        synchronized(workspaceStateLeases) { workspaceStateLeases.firstOrNull { it.holder === holder && it.key == key } }
+        dev.piko.shared.util.withPikoLock(workspaceStateLeasesLock) { workspaceStateLeases.firstOrNull { it.holder === holder && it.key == key } }
     }
     if (owner === lease) holder.SaveableStateProvider(key, content) else content()
 }
@@ -77,6 +78,7 @@ private fun WorkspaceStateProvider(holder: SaveableStateHolder, key: Long, conte
 internal fun WorkspaceContextHost(
     model: WorkspaceViewModel,
     onPlay: (FileStat, List<FileStat>) -> Unit,
+    onOpenDocument: (FileStat) -> Unit = {},
     onReveal: (FileStat) -> Unit,
     onTransfers: () -> Unit,
     onOpenSpaceMap: ((folderId: String, folderName: String) -> Unit)? = null,
@@ -115,6 +117,7 @@ internal fun WorkspaceContextHost(
                                     if (context.id in model.duplicateSessions) DriveScreen(
                                         onNavigateToFolder = { _, _ -> },
                                         onNavigateToVideoPlayer = onPlay,
+                                        onOpenDocument = onOpenDocument,
                                         browserSession = model.duplicateBrowser(context.id),
                                         onRevealInDrive = onReveal,
                                         onOpenSpaceMap = onOpenSpaceMap,
@@ -129,9 +132,19 @@ internal fun WorkspaceContextHost(
                         }
                         is WorkspaceContext.ImportDraft -> model.importModels[context.id]?.state?.let { draft ->
                             val content: @Composable () -> Unit = {
-                                InstantSheetContent(draft, view = model.importView(context.id), headerShown = true, fillHeight = true, onPreview = { id, name ->
-                                    onPlay(FileStat(id = id, name = name), emptyList())
-                                })
+                                InstantSheetContent(
+                                    state = draft,
+                                    view = model.importView(context.id) { dev.piko.ui.screens.instant.ImportWorkspaceViewState() },
+                                    headerShown = true,
+                                    fillHeight = true,
+                                    useImportWorkspace = wide,
+                                    onOpenLink = { url ->
+                                        if (draft.batch == null && draft.canEdit) draft.updateInput(url) else model.openImport(url)
+                                    },
+                                    onPreview = { id, name ->
+                                        onPlay(FileStat(id = id, name = name), emptyList())
+                                    },
+                                )
                             }
                             if (wide) {
                                 val summary = draft.summary()
@@ -149,7 +162,17 @@ internal fun WorkspaceContextHost(
                                             summary.status?.let { Text(it, style = MaterialTheme.typography.labelMedium, maxLines = 1) }
                                         }
                                     },
-                                    content = content,
+                                    content = {
+                                        Box(Modifier.fillMaxSize()) {
+                                            content()
+                                            SnackbarHost(
+                                                hostState = dev.piko.ui.LocalRootSnackbar.current,
+                                                modifier = androidx.compose.ui.Alignment.BottomCenter.let { align ->
+                                                    Modifier.align(align).padding(horizontal = 16.dp, vertical = 12.dp)
+                                                },
+                                            )
+                                        }
+                                    },
                                 )
                             } else {
                                 CompositionLocalProvider(LocalWorkspaceSurface provides WorkspaceSurface(context.id, onMinimize)) {

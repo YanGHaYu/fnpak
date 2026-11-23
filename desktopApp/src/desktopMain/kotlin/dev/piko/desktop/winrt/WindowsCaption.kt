@@ -17,10 +17,55 @@ import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout.ADDRESS
 import java.lang.foreign.ValueLayout.JAVA_INT
 import java.lang.foreign.ValueLayout.JAVA_LONG
-import java.lang.invoke.MethodHandle
+import java.lang.invoke.MethodHandleProxies
 import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+
+internal fun interface User32SetWindowLongPtr {
+    operator fun invoke(hwnd: MemorySegment, index: Int, value: MemorySegment): MemorySegment
+}
+
+internal fun interface User32PtrIntToPtr {
+    operator fun invoke(hwnd: MemorySegment, arg: Int): MemorySegment
+}
+
+internal fun interface User32PtrIntToInt {
+    operator fun invoke(hwnd: MemorySegment, index: Int): Int
+}
+
+internal fun interface User32CallWindowProc {
+    operator fun invoke(proc: MemorySegment, hwnd: MemorySegment, message: Int, wParam: Long, lParam: Long): Long
+}
+
+internal fun interface User32PostMessage {
+    operator fun invoke(hwnd: MemorySegment, message: Int, wParam: Long, lParam: Long): Int
+}
+
+internal fun interface User32PtrToInt {
+    operator fun invoke(ptr: MemorySegment): Int
+}
+
+internal fun interface User32PtrPtrToInt {
+    operator fun invoke(hwnd: MemorySegment, out: MemorySegment): Int
+}
+
+internal fun interface User32IntIntToInt {
+    operator fun invoke(index: Int, dpi: Int): Int
+}
+
+internal fun interface User32SetWindowPos {
+    operator fun invoke(
+        hwnd: MemorySegment,
+        insertAfter: MemorySegment,
+        x: Int,
+        y: Int,
+        cx: Int,
+        cy: Int,
+        flags: Int,
+    ): Int
+}
 
 /**
  * Windows 上由 Compose 绘制标题栏，同时保留系统窗口的行为。
@@ -60,11 +105,15 @@ internal class WindowsCaption(private val window: Window) {
     enum class Button { MINIMIZE, MAXIMIZE, CLOSE }
 
     /**
-     * 拖动区与按钮在 Compose 根坐标系里的位置，单位为像素，即 Skiko 画布的客户区坐标。拖动区是一组矩形：
-     * 有单独的标题栏时只有它一块；标题栏并进内容时是内容里的几块空白（见 WindowCaption），整行都答
-     * HTCAPTION 的话行里的控件就点不到了。
+     * 拖动区、交互排除区与按钮在 Compose 根坐标系里的位置，单位为像素，即 Skiko 画布的客户区坐标。
+     * 拖动区是一组矩形：有单独的标题栏时只有它一块；标题栏并进内容时是内容里的几块空白（见 WindowCaption）。
+     * 交互控件登记进 [exclusions] 后优先返回 HTCLIENT，绝不被重叠拖动区吞噬。
      */
-    private class Layout(val dragAreas: List<Rect>, val buttons: Map<Button, Rect>)
+    private class Layout(
+        val dragAreas: List<Rect>,
+        val buttons: Map<Button, Rect>,
+        val exclusions: List<Rect>,
+    )
 
     @Volatile
     private var layout: Layout? = null
@@ -105,10 +154,22 @@ internal class WindowsCaption(private val window: Window) {
     private val rect = arena.allocate(16)
     private val trackMouseEvent = arena.allocate(TRACKMOUSEEVENT_BYTES)
 
-    private val touch = WindowsTouchInput.create(window) { message, error -> PikoLog.w("touch", message, error) }
+    private val touch = WindowsTouchInput.create(window) { message, error -> PikoLog.w("WindowsTouch", message, error) }
+    private val loggedFrameProcError = AtomicBoolean(false)
+    private val loggedChildProcError = AtomicBoolean(false)
 
     private val frameProcStub: MemorySegment by lazy { upcall("frameProc") }
     private val childProcStub: MemorySegment by lazy { upcall("childProc") }
+
+    // 缓存窗口样式与 DPI 缩放边框厚度，避免鼠标掠过窗口时每次 WM_NCHITTEST 都走 4 次 Win32 FFM 调用。
+    @Volatile
+    private var cachedStyle: Int = WS_CAPTION or WS_THICKFRAME
+
+    @Volatile
+    private var cachedResizeBorder: Int = 8
+
+    @Volatile
+    private var trackingNonClientLeave: Boolean = false
 
     /**
      * 窗口已有 HWND 时接管标题栏。须在窗口首次显示前调用，否则系统标题栏会先闪一下。
@@ -119,27 +180,33 @@ internal class WindowsCaption(private val window: Window) {
         val hwnd = Win32Window.handleOf(window) ?: return false
         return runCatching {
             frame = hwnd
+            refreshWindowMetrics()
             // 这里在界面线程，窗口过程在工具包线程上跑：先记下原窗口过程再替换，替换后的第一条消息就要用到它
-            originalFrameProc = User32.getWindowLongPtr.invokeWithArguments(hwnd, GWLP_WNDPROC) as MemorySegment
+            originalFrameProc = User32.getWindowLongPtr(hwnd, GWLP_WNDPROC)
             live += this
-            User32.setWindowLongPtr.invokeWithArguments(hwnd, GWLP_WNDPROC, frameProcStub)
+            User32.setWindowLongPtr(hwnd, GWLP_WNDPROC, frameProcStub)
             hookChildren()
-            isMaximized = User32.isZoomed.invokeWithArguments(hwnd) as Int != 0
+            isMaximized = User32.isZoomed(hwnd) != 0
             // 触发一次 WM_NCCALCSIZE，让新的客户区立即生效
-            User32.setWindowPos.invokeWithArguments(
+            User32.setWindowPos(
                 hwnd, MemorySegment.NULL, 0, 0, 0, 0,
                 SWP_NOSIZE or SWP_NOMOVE or SWP_NOZORDER or SWP_NOACTIVATE or SWP_NOOWNERZORDER or SWP_FRAMECHANGED,
             )
             true
         }.getOrElse {
+            PikoLog.w("Window", "Failed to install custom caption window proc", it)
             frame = MemorySegment.NULL
             false
         }
     }
 
-    /** 拖动区或按钮的位置变化时由界面调用。 */
-    fun updateLayout(dragAreas: List<Rect>, buttons: Map<Button, Rect>) {
-        layout = Layout(dragAreas, buttons)
+    /** 拖动区、交互排除区或按钮的位置变化时由界面调用。 */
+    fun updateLayout(
+        dragAreas: List<Rect>,
+        buttons: Map<Button, Rect>,
+        exclusions: List<Rect> = emptyList(),
+    ) {
+        layout = Layout(dragAreas, buttons, exclusions)
     }
 
     /** 不显示标题栏时（如播放器全屏）整个窗口都是客户区。 */
@@ -147,6 +214,7 @@ internal class WindowsCaption(private val window: Window) {
         layout = null
         hovered = null
         pressed = null
+        trackingNonClientLeave = false
     }
 
     private fun upcall(name: String): MemorySegment {
@@ -175,11 +243,15 @@ internal class WindowsCaption(private val window: Window) {
                 }
                 WM_NCMOUSEMOVE -> {
                     val button = buttonOf(wParam)
-                    if (button != null) trackNonClientLeave(hwnd)
-                    hovered = button
+                    if (button != null && !trackingNonClientLeave) {
+                        trackingNonClientLeave = true
+                        trackNonClientLeave(hwnd)
+                    }
+                    if (hovered != button) hovered = button
                     // 仍交给系统：贴靠布局的弹出靠 DefWindowProc 看到 HTMAXBUTTON 上的悬停
                 }
                 WM_NCMOUSELEAVE -> {
+                    trackingNonClientLeave = false
                     hovered = null
                     pressed = null
                 }
@@ -199,6 +271,7 @@ internal class WindowsCaption(private val window: Window) {
                 WM_NCACTIVATE -> isActive = wParam != 0L
                 // 系统改设置时向每个顶层窗口广播一次；开着几个窗口就收到几次，重读很便宜，不去重
                 WM_SETTINGCHANGE -> SystemReducedMotion.onSystemSettingChange()
+                WM_STYLECHANGED, WM_DPICHANGED -> refreshWindowMetrics()
                 WM_ENTERSIZEMOVE -> isSizing = true
                 WM_EXITSIZEMOVE -> isSizing = false
                 WM_SIZE -> {
@@ -206,17 +279,21 @@ internal class WindowsCaption(private val window: Window) {
                         SIZE_MAXIMIZED -> isMaximized = true
                         SIZE_RESTORED -> isMaximized = false
                     }
+                    refreshWindowMetrics()
                     if (originalChildProcs.isEmpty()) hookChildren()
                 }
                 WM_NCDESTROY -> {
                     touch?.close()
-                    User32.setWindowLongPtr.invokeWithArguments(hwnd, GWLP_WNDPROC, originalFrameProc)
+                    User32.setWindowLongPtr(hwnd, GWLP_WNDPROC, originalFrameProc)
                     live -= this
                     return callFrame(hwnd, message, wParam, lParam)
                 }
             }
             return callFrame(hwnd, message, wParam, lParam)
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            if (loggedFrameProcError.compareAndSet(false, true)) {
+                PikoLog.w("Window", "Unhandled exception in custom frameProc; falling back to original window proc", e)
+            }
             return runCatching { callFrame(hwnd, message, wParam, lParam) }.getOrDefault(0L)
         }
     }
@@ -229,12 +306,15 @@ internal class WindowsCaption(private val window: Window) {
             when (message) {
                 WM_NCHITTEST -> if (hitTest(lParam) != HTCLIENT) return HTTRANSPARENT.toLong()
                 WM_NCDESTROY -> {
-                    User32.setWindowLongPtr.invokeWithArguments(hwnd, GWLP_WNDPROC, original)
+                    User32.setWindowLongPtr(hwnd, GWLP_WNDPROC, original)
                     originalChildProcs.remove(hwnd.address())
                 }
             }
             return callWindowProc(original, hwnd, message, wParam, lParam)
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            if (loggedChildProcError.compareAndSet(false, true)) {
+                PikoLog.w("Window", "Unhandled exception in custom childProc; falling back to original window proc", e)
+            }
             return runCatching { callWindowProc(original, hwnd, message, wParam, lParam) }.getOrDefault(0L)
         }
     }
@@ -248,12 +328,13 @@ internal class WindowsCaption(private val window: Window) {
      * 要计算的那个矩形。
      */
     private fun onNcCalcSize(hwnd: MemorySegment, wParam: Long, lParam: Long): Long {
+        refreshWindowMetrics()
         if (!hasCaption()) return callFrame(hwnd, WM_NCCALCSIZE, wParam, lParam)
         val proposed = MemorySegment.ofAddress(lParam).reinterpret(16)
         val originalLeft = proposed.get(JAVA_INT, 0)
         val originalTop = proposed.get(JAVA_INT, 4)
         val result = callFrame(hwnd, WM_NCCALCSIZE, wParam, lParam)
-        val zoomed = User32.isZoomed.invokeWithArguments(hwnd) as Int != 0
+        val zoomed = User32.isZoomed(hwnd) != 0
         val border = proposed.get(JAVA_INT, 0) - originalLeft
         proposed.set(JAVA_INT, 4, if (zoomed) originalTop + border else originalTop)
         return result
@@ -272,7 +353,7 @@ internal class WindowsCaption(private val window: Window) {
             val x = point.get(JAVA_INT, 0)
             val y = point.get(JAVA_INT, 4)
             if (y in 0 until band) {
-                User32.getClientRect.invokeWithArguments(frame, rect)
+                User32.getClientRect(frame, rect)
                 val width = rect.get(JAVA_INT, 8)
                 // 角上留得比顶边宽一些，与系统边框的斜向缩放区一致
                 return when {
@@ -285,6 +366,15 @@ internal class WindowsCaption(private val window: Window) {
 
         toClient(if (canvas != MemorySegment.NULL) canvas else frame, screenX, screenY)
         val position = Offset(point.get(JAVA_INT, 0).toFloat(), point.get(JAVA_INT, 4).toFloat())
+        return hitTestClientPosition(current, position)
+    }
+
+    internal fun hitTestClientPositionForTest(position: Offset): Int {
+        val current = layout ?: return HTCLIENT
+        return hitTestClientPosition(current, position)
+    }
+
+    private fun hitTestClientPosition(current: Layout, position: Offset): Int {
         for ((button, bounds) in current.buttons) {
             if (bounds.contains(position)) {
                 return when (button) {
@@ -294,6 +384,7 @@ internal class WindowsCaption(private val window: Window) {
                 }
             }
         }
+        if (current.exclusions.any { it.contains(position) }) return HTCLIENT
         return if (current.dragAreas.any { it.contains(position) }) HTCAPTION else HTCLIENT
     }
 
@@ -306,21 +397,22 @@ internal class WindowsCaption(private val window: Window) {
         }
         // 最小化或最大化后鼠标可能不再经过这里，收不到 WM_NCMOUSELEAVE
         hovered = null
-        User32.postMessage.invokeWithArguments(hwnd, WM_SYSCOMMAND, command.toLong(), 0L)
+        trackingNonClientLeave = false
+        User32.postMessage(hwnd, WM_SYSCOMMAND, command.toLong(), 0L)
     }
 
     /** 画布 HWND 之类的子窗口在 addNotify 时建好；此时若还没有，等首个 WM_SIZE 再找。 */
     private fun hookChildren() {
-        var child = User32.getWindow.invokeWithArguments(frame, GW_CHILD) as MemorySegment
+        var child = User32.getWindow(frame, GW_CHILD)
         while (child != MemorySegment.NULL) {
             if (!originalChildProcs.containsKey(child.address())) {
                 // 先登记再替换：替换后到来的第一条消息就要查得到原窗口过程
-                val original = User32.getWindowLongPtr.invokeWithArguments(child, GWLP_WNDPROC) as MemorySegment
+                val original = User32.getWindowLongPtr(child, GWLP_WNDPROC)
                 originalChildProcs[child.address()] = original
-                User32.setWindowLongPtr.invokeWithArguments(child, GWLP_WNDPROC, childProcStub)
+                User32.setWindowLongPtr(child, GWLP_WNDPROC, childProcStub)
                 if (canvas == MemorySegment.NULL) canvas = child
             }
-            child = User32.getWindow.invokeWithArguments(child, GW_HWNDNEXT) as MemorySegment
+            child = User32.getWindow(child, GW_HWNDNEXT)
         }
     }
 
@@ -329,31 +421,33 @@ internal class WindowsCaption(private val window: Window) {
         trackMouseEvent.set(JAVA_INT, 4, TME_LEAVE or TME_NONCLIENT)
         trackMouseEvent.set(ADDRESS, 8, hwnd)
         trackMouseEvent.set(JAVA_INT, 16, 0)
-        User32.trackMouseEvent.invokeWithArguments(trackMouseEvent)
+        User32.trackMouseEvent(trackMouseEvent)
     }
 
-    private fun style(): Int = User32.getWindowLong.invokeWithArguments(frame, GWL_STYLE) as Int
+    private fun refreshWindowMetrics() {
+        if (frame == MemorySegment.NULL) return
+        cachedStyle = User32.getWindowLong(frame, GWL_STYLE)
+        val dpi = User32.getDpiForWindow(frame)
+        cachedResizeBorder = User32.getSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) +
+            User32.getSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+    }
 
     /**
      * 无边框全屏（[WindowsFullscreen]）去掉了标题栏样式，这时两处改动都让开：客户区照系统算，
      * 命中一律答客户区。布局随后也会被 clearLayout 清掉，但改样式与重组之间有一段空档，
      * 那时按旧布局答 HTCAPTION，全屏画面顶端一条就成了拖动区。WS_CAPTION 是两个位的组合，要两位都在。
      */
-    private fun hasCaption(): Boolean = style() and WS_CAPTION == WS_CAPTION
+    private fun hasCaption(): Boolean = cachedStyle and WS_CAPTION == WS_CAPTION
 
-    private fun hasThickFrame(): Boolean = style() and WS_THICKFRAME != 0
+    private fun hasThickFrame(): Boolean = cachedStyle and WS_THICKFRAME != 0
 
     /** 标题栏被收进客户区之前，系统在顶端留给缩放的厚度，按窗口当前所在显示器的 DPI 取。 */
-    private fun resizeBorder(): Int {
-        val dpi = User32.getDpiForWindow.invokeWithArguments(frame) as Int
-        return (User32.getSystemMetricsForDpi.invokeWithArguments(SM_CYSIZEFRAME, dpi) as Int) +
-            (User32.getSystemMetricsForDpi.invokeWithArguments(SM_CXPADDEDBORDER, dpi) as Int)
-    }
+    private fun resizeBorder(): Int = cachedResizeBorder
 
     private fun toClient(hwnd: MemorySegment, screenX: Int, screenY: Int) {
         point.set(JAVA_INT, 0, screenX)
         point.set(JAVA_INT, 4, screenY)
-        User32.screenToClient.invokeWithArguments(hwnd, point)
+        User32.screenToClient(hwnd, point)
     }
 
     private fun buttonOf(hitTest: Long): Button? = when (hitTest.toInt()) {
@@ -367,31 +461,80 @@ internal class WindowsCaption(private val window: Window) {
         callWindowProc(originalFrameProc, hwnd, message, wParam, lParam)
 
     private fun callWindowProc(proc: MemorySegment, hwnd: MemorySegment, message: Int, wParam: Long, lParam: Long): Long =
-        User32.callWindowProc.invokeWithArguments(proc, hwnd, message, wParam, lParam) as Long
+        User32.callWindowProc(proc, hwnd, message, wParam, lParam)
 
     private object User32 {
         private val lookup = SymbolLookup.libraryLookup("user32", Arena.global())
         private val linker = Linker.nativeLinker()
 
-        private fun handle(name: String, descriptor: FunctionDescriptor): MethodHandle =
-            linker.downcallHandle(lookup.find(name).orElseThrow(), descriptor)
+        private fun <T> bind(type: Class<T>, name: String, descriptor: FunctionDescriptor): T =
+            MethodHandleProxies.asInterfaceInstance(
+                type,
+                linker.downcallHandle(lookup.find(name).orElseThrow(), descriptor),
+            )
 
-        val setWindowLongPtr = handle("SetWindowLongPtrW", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, ADDRESS))
-        val getWindowLongPtr = handle("GetWindowLongPtrW", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT))
-        val getWindowLong = handle("GetWindowLongW", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))
-        val callWindowProc = handle(
+        val setWindowLongPtr = bind(
+            User32SetWindowLongPtr::class.java,
+            "SetWindowLongPtrW",
+            FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, ADDRESS),
+        )
+        val getWindowLongPtr = bind(
+            User32PtrIntToPtr::class.java,
+            "GetWindowLongPtrW",
+            FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT),
+        )
+        val getWindowLong = bind(
+            User32PtrIntToInt::class.java,
+            "GetWindowLongW",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT),
+        )
+        val callWindowProc = bind(
+            User32CallWindowProc::class.java,
             "CallWindowProcW",
             FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT, JAVA_LONG, JAVA_LONG),
         )
-        val postMessage = handle("PostMessageW", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG, JAVA_LONG))
-        val isZoomed = handle("IsZoomed", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-        val getWindow = handle("GetWindow", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT))
-        val getClientRect = handle("GetClientRect", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS))
-        val screenToClient = handle("ScreenToClient", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS))
-        val trackMouseEvent = handle("TrackMouseEvent", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-        val getDpiForWindow = handle("GetDpiForWindow", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-        val getSystemMetricsForDpi = handle("GetSystemMetricsForDpi", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT))
-        val setWindowPos = handle(
+        val postMessage = bind(
+            User32PostMessage::class.java,
+            "PostMessageW",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG, JAVA_LONG),
+        )
+        val isZoomed = bind(
+            User32PtrToInt::class.java,
+            "IsZoomed",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS),
+        )
+        val getWindow = bind(
+            User32PtrIntToPtr::class.java,
+            "GetWindow",
+            FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT),
+        )
+        val getClientRect = bind(
+            User32PtrPtrToInt::class.java,
+            "GetClientRect",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS),
+        )
+        val screenToClient = bind(
+            User32PtrPtrToInt::class.java,
+            "ScreenToClient",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS),
+        )
+        val trackMouseEvent = bind(
+            User32PtrToInt::class.java,
+            "TrackMouseEvent",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS),
+        )
+        val getDpiForWindow = bind(
+            User32PtrToInt::class.java,
+            "GetDpiForWindow",
+            FunctionDescriptor.of(JAVA_INT, ADDRESS),
+        )
+        val getSystemMetricsForDpi = bind(
+            User32IntIntToInt::class.java,
+            "GetSystemMetricsForDpi",
+            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT),
+        )
+        val setWindowPos = bind(
+            User32SetWindowPos::class.java,
             "SetWindowPos",
             FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT),
         )
@@ -412,6 +555,7 @@ internal class WindowsCaption(private val window: Window) {
 
         const val WM_SIZE = 0x0005
         const val WM_SETTINGCHANGE = 0x001A
+        const val WM_STYLECHANGED = 0x007D
         const val WM_NCDESTROY = 0x0082
         const val WM_NCCALCSIZE = 0x0083
         const val WM_NCHITTEST = 0x0084
@@ -422,6 +566,7 @@ internal class WindowsCaption(private val window: Window) {
         const val WM_NCLBUTTONDBLCLK = 0x00A3
         const val WM_SYSCOMMAND = 0x0112
         const val WM_NCMOUSELEAVE = 0x02A2
+        const val WM_DPICHANGED = 0x02E0
         const val WM_ENTERSIZEMOVE = 0x0231
         const val WM_EXITSIZEMOVE = 0x0232
 

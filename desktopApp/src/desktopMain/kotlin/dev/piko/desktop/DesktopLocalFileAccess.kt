@@ -45,7 +45,7 @@ class DesktopLocalFileAccess(private val scope: CoroutineScope, private val chan
         require(location.mountId == mount.mountId)
         val root = Path.of(mount.localRootUriOrPath).toRealPath()
         val child = location.segments.fold(root) { path, part -> path.resolve(part) }.toRealPath()
-        require(child.startsWith(root)) { "本机文件夹不可访问" }
+        require(child.startsWith(root)) { "Local folder is not accessible" }
         return child
     }
     private fun stat(mount: LocalMount, location: LocalLocation, path: Path, attributes: BasicFileAttributes): FileStat {
@@ -167,10 +167,20 @@ class DesktopLocalFileAccess(private val scope: CoroutineScope, private val chan
                     cache.enrich(file) { output -> metadata(mount, target, file, output) }
                 }
             }
-        } catch (_: Exception) { throw IllegalStateException("本机文件夹不可访问") }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Exception) {
+            throw IllegalStateException("Local folder is not accessible", e)
+        }
     }
     override suspend fun playbackPath(mount: LocalMount, location: LocalLocation): String = withContext(Dispatchers.IO) {
-        try { path(mount, location).toString() } catch (_: Exception) { throw IllegalStateException("本机文件夹不可访问") }
+        try {
+            path(mount, location).toString()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Exception) {
+            throw IllegalStateException("Local folder is not accessible", e)
+        }
     }
     override suspend fun probe(mount: LocalMount, location: LocalLocation): FileStat? = withContext(Dispatchers.IO) {
         try {
@@ -179,11 +189,38 @@ class DesktopLocalFileAccess(private val scope: CoroutineScope, private val chan
             cache.probe(file) { output -> metadata(mount, location, file, output) }
         } catch (cancel: CancellationException) {
             throw cancel
-        } catch (_: Exception) { throw IllegalStateException("本机文件夹不可访问") }
+        } catch (e: Exception) {
+            throw IllegalStateException("Local folder is not accessible", e)
+        }
+    }
+    override suspend fun readBytes(mount: LocalMount, location: LocalLocation, maxBytes: Int): Pair<ByteArray, Long>? = withContext(Dispatchers.IO) {
+        if (maxBytes <= 0) return@withContext null
+        try {
+            val target = path(mount, location)
+            val attrs = Files.readAttributes(target, BasicFileAttributes::class.java)
+            if (attrs.isDirectory) return@withContext null
+            val total = attrs.size()
+            val limit = minOf(total, maxBytes.toLong()).toInt()
+            if (limit <= 0) return@withContext ByteArray(0) to total
+            Files.newInputStream(target, NOFOLLOW_LINKS).use { input ->
+                val out = ByteArray(limit)
+                var filled = 0
+                while (filled < limit) {
+                    val n = input.read(out, filled, limit - filled)
+                    if (n <= 0) break
+                    filled += n
+                }
+                (if (filled == limit) out else out.copyOf(filled)) to total
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Exception) {
+            throw IllegalStateException("Local folder is not accessible", e)
+        }
     }
     private suspend fun metadata(mount: LocalMount, location: LocalLocation, file: FileStat, output: File, gen: Long = generation.get()): LocalMediaMetadata? {
         val context = currentCoroutineContext()
-        if (!context.isActive || generation.get() != gen) throw CancellationException("本地媒体探测已取消")
+        if (!context.isActive || generation.get() != gen) throw CancellationException("Local media probe cancelled")
         val verified = path(mount, location)
         if (file.isPlayableVideo()) return FileChannel.open(verified, StandardOpenOption.READ, NOFOLLOW_LINKS).use { channel ->
             dev.piko.desktop.media.probeLocalVideo(channel, output, cancelled = { !context.isActive || generation.get() != gen })

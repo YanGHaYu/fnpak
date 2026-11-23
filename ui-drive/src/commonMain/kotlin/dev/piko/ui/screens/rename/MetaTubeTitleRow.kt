@@ -1,0 +1,89 @@
+package dev.piko.ui.screens.rename
+
+import dev.piko.ui.resources.*
+import dev.piko.ui.i18n.stringResource
+
+import dev.piko.shared.i18n.tr
+
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import dev.piko.shared.naming.av.canonicalAvName
+import dev.piko.shared.naming.av.canonicalAvNameOf
+import dev.piko.shared.naming.av.parseAvForRename
+import dev.piko.shared.naming.parseMediaName
+import dev.piko.shared.scrape.MetaTubeService
+import dev.piko.ui.components.InlineLoadingIndicator
+import kotlinx.coroutines.launch
+
+/**
+ * 单个条目按番号规范命名时，对话框里取片名的一行：点一下从 MetaTube 查，查到就把输入框换成带这个片名的规范名。
+ * 不在打开对话框时自动查：多数时候原名里的片名就够用，查询要等外部站点，几秒到十几秒。
+ * 状态文字常驻这一行，查询前后对话框高度不变（对话框里不做尺寸变化，见 ui/AGENTS.md）。
+ */
+@Composable
+internal fun MetaTubeTitleRow(
+    fileName: String,
+    service: MetaTubeService,
+    isFolder: Boolean = false,
+    onNameFound: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var querying by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var failed by remember { mutableStateOf(false) }
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(
+            enabled = !querying,
+            onClick = {
+                val info = parseAvForRename(fileName, isFolder) ?: return@TextButton
+                querying = true
+                status = tr("正在查询", "Checking", "照会中", "조회 중", "正在查詢")
+                failed = false
+                scope.launch {
+                    val result = service.titles(listOf(info))
+                    val title = result.titles[info.code]
+                    querying = false
+                    failed = result.failed > 0
+                    status = when {
+                        title != null -> {
+                            val formatted = if (isFolder) {
+                                canonicalAvName(fileName, info, title = title, isFolder = true)
+                            } else {
+                                canonicalAvNameOf(fileName, title)
+                            }
+                            formatted?.let(onNameFound)
+                            tr("已填入查到的片名", "Retrieved title inserted", "取得した作品名を入力しました", "조회한 제목을 입력했습니다", "已填入查到的片名")
+                        }
+                        failed -> tr("查询失败", "Query failed", "照会に失敗しました", "조회 실패", "查詢失敗")
+                        else -> tr("未查到片名", "Title not found", "作品名が見つかりません", "제목을 찾지 못했습니다", "未查到片名")
+                    }
+                }
+            },
+        ) { Text(stringResource(Res.string.text_get_title_from_metatube)) }
+        Spacer(Modifier.width(8.dp))
+        if (querying) InlineLoadingIndicator()
+        Text(
+            text = status.orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}

@@ -1,5 +1,9 @@
 package dev.piko.shared.memory
 
+import dev.piko.shared.log.LogLevel
+import dev.piko.shared.log.PikoLog
+import dev.piko.shared.util.PikoLock
+import dev.piko.shared.util.withPikoLock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,45 +33,78 @@ interface MemoryParticipant {
 class PikoMemoryGovernor(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
-    private val lock = Any()
+    private val lock = PikoLock()
     private val heavy = Semaphore(1)
     private val mutablePolicy = MutableStateFlow(MemoryPolicy.Normal)
     val policy: StateFlow<MemoryPolicy> = mutablePolicy.asStateFlow()
     private var visible = true
+    private var backgroundPlaybackActive = false
     private var pressure = MemoryPolicy.Normal
     private var lowSamples = 0
     private var criticalSamples = 0
     private var availableBytes = Long.MAX_VALUE
 
-    fun onVisibilityChanged(visible: Boolean) = synchronized(lock) {
-        this.visible = visible
-        if (!visible && pressure == MemoryPolicy.Normal) {
-            pressure = MemoryPolicy.Constrained
-            lowSamples = 0
+    /**
+     * 外部播放器经本机回环代理拉流时，应用虽处于后台但仍承载前台级播放吞吐；
+     * 保护期间不因单纯切后台而将传输预算压至 Background (25%)，仍严格遵守真实堆水位与系统内存修剪信号。
+     */
+    fun setBackgroundPlaybackActive(active: Boolean) {
+        withPikoLock(lock) {
+            if (backgroundPlaybackActive == active) return
+            backgroundPlaybackActive = active
+            publish()
         }
-        publish()
     }
 
-    fun onPlatformTrim(trim: MemoryTrim) = synchronized(lock) {
-        lowSamples = 0
-        criticalSamples = 0
-        when (trim) {
-            MemoryTrim.Background -> {
-                visible = false
-                if (pressure == MemoryPolicy.Normal) pressure = MemoryPolicy.Constrained
-            }
-            MemoryTrim.Critical -> pressure = MemoryPolicy.Critical
-            MemoryTrim.Moderate, MemoryTrim.Low -> if (pressure == MemoryPolicy.Normal) {
+    fun onVisibilityChanged(visible: Boolean) {
+        val transitioned = withPikoLock(lock) {
+            this.visible = visible
+            val before = pressure
+            if (!visible && !backgroundPlaybackActive && pressure == MemoryPolicy.Normal) {
                 pressure = MemoryPolicy.Constrained
+                lowSamples = 0
             }
+            publish()
+            before != pressure
         }
-        publish()
+        if (transitioned) {
+            PikoLog.d(TAG, "Memory pressure transitioned: Normal -> Constrained (app entered background)")
+        }
+    }
+
+    fun onPlatformTrim(trim: MemoryTrim) {
+        var before = MemoryPolicy.Normal
+        var after = MemoryPolicy.Normal
+        withPikoLock(lock) {
+            before = pressure
+            lowSamples = 0
+            criticalSamples = 0
+            when (trim) {
+                MemoryTrim.Background -> {
+                    visible = false
+                    if (pressure == MemoryPolicy.Normal) pressure = MemoryPolicy.Constrained
+                }
+                MemoryTrim.Critical -> pressure = MemoryPolicy.Critical
+                MemoryTrim.Moderate, MemoryTrim.Low -> if (pressure == MemoryPolicy.Normal) {
+                    pressure = MemoryPolicy.Constrained
+                }
+            }
+            after = pressure
+            publish()
+        }
+        if (before != after) {
+            val level = if (after == MemoryPolicy.Critical) LogLevel.WARN else LogLevel.INFO
+            PikoLog.log(level, TAG, "Memory pressure transitioned: $before -> $after (platformTrim=$trim)")
+        }
     }
 
     /** Three low-water samples are required for each recovery step; visibility alone never resets pressure. */
     fun onHeapSample(usedBytes: Long, maxBytes: Long) {
         require(maxBytes > 0 && usedBytes >= 0)
-        synchronized(lock) {
+        var before = MemoryPolicy.Normal
+        var after = MemoryPolicy.Normal
+        withPikoLock(lock) {
+            before = pressure
             availableBytes = (maxBytes - usedBytes).coerceAtLeast(0)
             val ratio = usedBytes.toDouble() / maxBytes
             when {
@@ -96,7 +133,15 @@ class PikoMemoryGovernor(
                     criticalSamples = 0
                 }
             }
+            after = pressure
             publish()
+        }
+        if (before != after) {
+            val usedMiB = usedBytes / (1024L * 1024L)
+            val maxMiB = maxBytes / (1024L * 1024L)
+            val pct = usedBytes * 100L / maxBytes
+            val level = if (after == MemoryPolicy.Critical) LogLevel.WARN else LogLevel.INFO
+            PikoLog.log(level, TAG, "Memory pressure transitioned: $before -> $after (heap=${usedMiB}/${maxMiB} MiB, $pct%)")
         }
     }
 
@@ -113,18 +158,33 @@ class PikoMemoryGovernor(
     suspend fun acquire(kind: MemoryWorkKind, estimatedPeakBytes: Long): MemoryPermit {
         require(estimatedPeakBytes >= 0) { "Negative peak estimate for $kind" }
         heavy.acquire()
-        synchronized(lock) {
+        var availSnapshot = 0L
+        val throttled = withPikoLock(lock) {
+            availSnapshot = availableBytes
             if (estimatedPeakBytes > availableBytes && pressure == MemoryPolicy.Normal) {
                 pressure = MemoryPolicy.Constrained
                 lowSamples = 0
                 publish()
+                true
+            } else {
+                false
             }
         }
+        if (throttled) {
+            PikoLog.i(
+                TAG,
+                "Memory pressure constrained for heavy work $kind (estimatedPeak=${estimatedPeakBytes / 1024L} KiB, available=${availSnapshot / 1024L} KiB)",
+            )
+        }
         return object : MemoryPermit {
+            private val releaseLock = PikoLock()
             private var released = false
             override fun release() {
-                val release = synchronized(this) {
-                    if (released) false else { released = true; true }
+                val release = withPikoLock(releaseLock) {
+                    if (released) false else {
+                        released = true
+                        true
+                    }
                 }
                 if (release) heavy.release()
             }
@@ -132,10 +192,11 @@ class PikoMemoryGovernor(
     }
 
     private fun publish() {
-        mutablePolicy.value = if (visible) pressure else MemoryPolicy.Background
+        mutablePolicy.value = if (visible || backgroundPlaybackActive) pressure else MemoryPolicy.Background
     }
 
     companion object {
+        private const val TAG = "Memory"
         val Shared = PikoMemoryGovernor()
     }
 }

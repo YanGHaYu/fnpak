@@ -6,11 +6,15 @@ import androidx.compose.runtime.setValue
 import dev.piko.shared.data.PikoDriveRepository
 import dev.piko.shared.data.PikoFileSortOrder
 import dev.piko.shared.data.PikoPathBreadcrumb
+import dev.piko.shared.data.VaultEntry
 import dev.piko.shared.data.isVaulted
 import dev.piko.shared.i18n.enCount
 import dev.piko.shared.i18n.tr
+import dev.piko.shared.log.PikoLog
 import dev.piko.shared.log.logFailure
+import dev.piko.shared.log.logFolder
 import dev.piko.shared.presentation.localizedName
+import dev.piko.shared.runtime.PikoWorkloadGovernor
 import io.github.nihildigit.pikpak.FileStat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +67,7 @@ class GallerySession(
         private set
 
     private var selectedIds: Set<String>? = null
+    private var selectedVaultEntryIds: Set<String> = emptySet()
     private var selectedParentIds: Set<String> = emptySet()
     private var rootPath = emptyList<PikoPathBreadcrumb>()
     private var folders by mutableStateOf(driveRepo.folderIndex.flow.value)
@@ -130,6 +135,7 @@ class GallerySession(
         root = folder
         account = owner
         selectedIds = ids
+        selectedVaultEntryIds = selection?.mapNotNullTo(HashSet()) { VaultEntry.entryIdOf(it.id) }.orEmpty()
         selectedParentIds = selection?.mapTo(LinkedHashSet()) { it.parentId }.orEmpty()
         selectedMediaTotal = selection?.size
         selectedVideoCount = selection?.count { it.isDiscoverableVideo() }
@@ -157,7 +163,7 @@ class GallerySession(
             }
             return
         }
-        discovery = VideoDiscovery(driveRepo, owner, folder.id)
+        discovery = VideoDiscovery(driveRepo, owner, folder.id, includeImages = true)
         discoveredFolders += folder.id
         hasMore = true
         requestMore()
@@ -183,12 +189,14 @@ class GallerySession(
                         .filter { it.isDiscoverableGalleryMedia(includeImages) }
                         .map { it.clipContentKey() }.distinct().count { it !in emitted }
                     if (uniquePending >= FILES_PER_REQUEST && (files.isNotEmpty() || listed >= OPENING_FOLDERS)) break
+                    val allowedConcurrency = PikoWorkloadGovernor.Shared.awaitDiscoveryConcurrency(DISCOVERY_CONCURRENCY)
+                    if (discovery !== traversal || request != generation) return@launch
                     val budget = if (files.isEmpty() && listed < OPENING_FOLDERS) {
-                        (OPENING_FOLDERS - listed).coerceAtMost(DISCOVERY_CONCURRENCY)
+                        (OPENING_FOLDERS - listed).coerceAtMost(allowedConcurrency)
                     } else {
-                        (FOLDERS_PER_REQUEST - listed).coerceAtMost(DISCOVERY_CONCURRENCY)
+                        (FOLDERS_PER_REQUEST - listed).coerceAtMost(allowedConcurrency)
                     }
-                    val batches = traversal.nextBatch(budget, DISCOVERY_CONCURRENCY)
+                    val batches = traversal.nextBatch(budget, allowedConcurrency)
                     if (batches.isEmpty()) break
                     listed += batches.size
                     batches.forEach(::rememberBatch)
@@ -255,6 +263,7 @@ class GallerySession(
         shown = false
         root = null
         selectedIds = null
+        selectedVaultEntryIds = emptySet()
         selectedParentIds = emptySet()
         selectedVideoCount = null
         selectedImageCount = 0
@@ -300,7 +309,7 @@ class GallerySession(
     private fun rememberBatch(batch: VideoFolderBatch) {
         discoveredFolders += batch.folderId
         batch.failure?.let { error ->
-            Result.failure<Unit>(error).logFailure("GallerySession", "画廊列目录失败，可重试")
+            PikoLog.w(TAG, "Failed to list gallery folder ${logFolder(batch.folderId)} during discovery (retryable)", error)
             return
         }
         discoveredFolders += batch.files.filter { it.isFolder }.map { it.id }
@@ -348,8 +357,9 @@ class GallerySession(
                         val listing = driveRepo.listBrowsable(parentId, PikoFileSortOrder.NAME_ASC)
                         if (request != generation) return@launch
                         listing.onSuccess { latest ->
-                            val media = latest.filter {
-                                it.id in selectedVideoIds && it.isDiscoverableGalleryMedia(includeImages = true) && it.hasGalleryCover()
+                            val media = latest.filter { item ->
+                                (item.id in selectedVideoIds || VaultEntry.entryIdOf(item.id)?.let { it in selectedVaultEntryIds } == true) &&
+                                    item.isDiscoverableGalleryMedia(includeImages = true) && item.hasGalleryCover()
                             }
                             val batch = analyzeVideoFolder(parentId, media)
                             if (request != generation) return@launch
@@ -357,7 +367,7 @@ class GallerySession(
                             folderVideos[parentId] = media
                             workOf.putAll(batch.workOf)
                             failedFolders = failedFolders - parentId
-                        }.logFailure("GallerySession", "画廊列目录失败，可重试")
+                        }.logFailure(TAG, "Failed to refresh selected gallery parent folder ${logFolder(parentId)}")
                             .onFailure { failedFolders = failedFolders + (parentId to it) }
                     }
                     pendingRefresh.removeAll(targets.toSet())
@@ -367,7 +377,7 @@ class GallerySession(
                     isComplete = failedFolders.isEmpty()
                     return@launch
                 }
-                traversal.rebind(driveRepo, account ?: throw CancellationException("Account changed"))
+                traversal.rebind(driveRepo, account ?: throw CancellationException("Account changed"), includeImages = true)
                 val batches = mutableListOf<VideoFolderBatch>()
                 val targets = pendingRefresh.toList()
                 // 先重列所有受影响层，再判断目录是否移出范围，避免同一子树在范围内移动时短暂消失。
@@ -407,6 +417,7 @@ class GallerySession(
     }
 
     private companion object {
+        const val TAG = "GallerySession"
         const val FILES_PER_REQUEST = 48
         const val FOLDERS_PER_REQUEST = 16
         const val OPENING_FOLDERS = 6
