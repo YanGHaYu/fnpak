@@ -213,9 +213,47 @@ class FolderDownloadSmokeTest {
                 statuses.count { it == DownloadStatus.PENDING } == 3
         }
 
-        repeat(20) { gate.trySend(Unit) }
+        // 每次 CDN 读消耗一张放行券；缩小并发时被取消的读也会消耗，券要够多才不会饿住收尾。
+        repeat(200) { gate.trySend(Unit) }
         awaitUntil("放行后全部 4 个文件依次下载完成") {
             coordinator.tasks.value.values.all { it.status == DownloadStatus.COMPLETED }
+        }
+        directory.deleteRecursively()
+    }
+
+    @Test
+    fun `a folder added while a single file is mid-download starts without waiting for it`() = smoke { scope ->
+        val server = FakePikPakServer()
+        val first = server.addFile("first.bin", "", ByteArray(1024) { 1 }, hash = "FIRST")
+        val later = server.addFolder("Later")
+        server.addFile("late.bin", later.id, ByteArray(2048) { 2 }, hash = "LATE")
+        // 把所有 CDN 读挂住：任务进入 DOWNLOADING 后不会自己完成，模拟「第一个任务一直在下」。
+        val gate = Channel<Unit>(Channel.UNLIMITED)
+        server.beforeCdnRange = { gate.receive() }
+        val provider = server.provider()
+        val prefs = MemoryPreferences()
+        val repo = PikoDriveRepository(provider, prefs)
+        val directory = Files.createTempDirectory("piko-queue-order").toFile()
+        val coordinator = PikoDownloadCoordinator(provider, prefs, DirectoryStorage(directory), scope)
+        val files = repo.listAllFiles().getOrThrow()
+        val firstStat = files.single { it.id == first.id }
+        val folderStat = files.single { it.id == later.id }
+
+        coordinator.enqueue(firstStat)
+        awaitUntil("单文件任务开始下载") {
+            coordinator.tasks.value.values.singleOrNull { it.fileId == first.id }?.status == DownloadStatus.DOWNLOADING
+        }
+        coordinator.enqueueFolders(listOf(folderStat), DriveDownloadFolderSource(repo), maxHeight = 0)
+        awaitUntil("第一个任务仍在下时，后加的文件夹任务也进入下载中") {
+            coordinator.tasks.value.values.any {
+                it.fileName.endsWith("late.bin") && it.status == DownloadStatus.DOWNLOADING
+            }
+        }
+
+        repeat(50) { gate.trySend(Unit) }
+        awaitUntil("放行后两个任务都完成") {
+            coordinator.tasks.value.values.size == 2 &&
+                coordinator.tasks.value.values.all { it.status == DownloadStatus.COMPLETED }
         }
         directory.deleteRecursively()
     }

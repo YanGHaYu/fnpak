@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.joinAll
@@ -310,9 +311,10 @@ internal class DownloadTaskExecutor(
      * 检查，不动任何正在跑的下载：
      * 1. 清掉「协程已结束」的登记（正常收尾不会留下，残留只会来自取消与启动的竞态）；
      * 2. 卡在 DOWNLOADING 但协程已结束的任务回到 PENDING，按断点续传重新排队；
-     * 3. 有排队任务且有空位就补一次调度。
+     * 3. 标记为 DOWNLOADING 却没有任何协程在跑的任务（例如入队时复用了旧的下载中记录）回到 PENDING；
+     * 4. 有排队任务且有空位就补一次调度。
      */
-    private fun reconcileQueue() {
+    private suspend fun reconcileQueue() {
         val completedJobs = jobs.value.filterValues { it.isCompleted }
         if (completedJobs.isNotEmpty()) {
             val revived = mutableListOf<String>()
@@ -328,6 +330,25 @@ internal class DownloadTaskExecutor(
             PikoLog.w(DOWNLOAD_LOG_TAG, "队列自愈：清理 ${completedJobs.size} 个已结束的下载登记" +
                 if (revived.isEmpty()) "" else "，${revived.size} 个卡在下载中的任务重新排队")
         }
+        // 没有协程在跑的「下载中」任务永远不会再被调度：入队时如果复用了表里旧的下载中记录，
+        // 就会留下这种孤儿。把它放回排队，让 pumpQueue 重新认领（调度与登记都在 queueLock 内，不会误伤）。
+        var orphans = 0
+        queueLock.withLock {
+            val orphaned = store.tasks.value.values.filter {
+                it.status == DownloadStatus.DOWNLOADING && it.taskId !in jobs.value && store.belongsToCurrent(it)
+            }
+            if (orphaned.isNotEmpty()) {
+                store.updateTasks { tasks ->
+                    tasks + orphaned.mapNotNull { task ->
+                        tasks[task.taskId]?.takeIf { it.status == DownloadStatus.DOWNLOADING }?.let {
+                            task.taskId to it.copy(status = DownloadStatus.PENDING, speedBytesPerSec = 0L, segments = null)
+                        }
+                    }
+                }
+                orphans = orphaned.size
+            }
+        }
+        if (orphans > 0) PikoLog.w(DOWNLOAD_LOG_TAG, "队列自愈：$orphans 个没有协程的下载中任务重新排队")
         val pending = store.tasks.value.values.count { it.status == DownloadStatus.PENDING && store.belongsToCurrent(it) }
         if (pending > 0 && jobs.value.size < maxParallel) pumpQueue()
     }
@@ -553,6 +574,12 @@ internal class DownloadTaskExecutor(
             } else {
                 task.parentId
             }
+            // 「单文件连接数」设置（1–8）落到每个文件自己的连接预算上：它只决定一个文件
+            // 同时开几条 Range 连接，不决定能同时下几个任务（那是 maxConcurrentDownloads）。
+            // 账号总量由 SDK 统一封顶（16 条，与播放/缩略图共用）。
+            val perFileConnections = preferences.concurrentConnectionsFlow.firstOrNull()
+                ?.coerceIn(DownloadConcurrencyDefaults.MIN, DownloadConcurrencyDefaults.MAX)
+                ?: client.connectionBudget
             lease = fileCachePool.acquire(
                 client = client,
                 fileId = task.fileId,
@@ -562,6 +589,7 @@ internal class DownloadTaskExecutor(
                 parentId = leaseParentId,
                 leased = isLeased,
                 retained = true,
+                concurrency = perFileConnections,
                 owner = taskId,
                 mediaId = task.mediaId,
                 streamSize = task.totalBytes,

@@ -9,9 +9,14 @@ import dev.piko.shared.download.DirectDownloadProgress
 import dev.piko.shared.download.DownloadFolderSource
 import dev.piko.shared.download.PikoDirectDownloader
 import dev.piko.shared.download.PikoDownloadCoordinator
+import io.github.nihildigit.pikpak.DurableBlockStore
 import io.github.nihildigit.pikpak.FileKind
 import io.github.nihildigit.pikpak.FileStat
 import io.github.nihildigit.pikpak.PikPakClient
+import io.github.nihildigit.pikpak.RangeSource
+import io.github.nihildigit.pikpak.fileCache
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.writeFully
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -20,8 +25,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.builtins.ListSerializer
@@ -46,6 +53,12 @@ fun main() = runBlocking {
 
     println("===== 4. 整文件夹递归 =====")
     folderBench()
+
+    println("===== 5. 单文件在跑时追加文件夹（队列唤醒） =====")
+    queueAfterSingleBench()
+
+    println("===== 6. SDK 两个文件缓存并发（共用 client 预算） =====")
+    sdkTwoCachesBench()
 
     println("BENCH OK")
 }
@@ -174,6 +187,137 @@ private suspend fun folderBench() = runBlocking {
         check(completed.all { it.parentTaskId.isNotBlank() }) { "文件夹任务缺少 parentTaskId" }
         check(completed.all { it.rootFolderId == "root-folder" }) { "文件夹任务 rootFolderId 不对" }
         println("[folder] 递归展开 ${completed.size} 个文件，全部完成，parentTaskId/rootFolderId 正确")
+    }
+}
+
+private suspend fun queueAfterSingleBench() = runBlocking {
+    withGraph { graph, downloader ->
+        // 先让单文件停在下载中，模拟真机「先加单文件、它正在下」的状态
+        downloader.hold("first-single.bin")
+        graph.downloadCoordinator.enqueue(file("first", "first-single.bin", 512 * 1024))
+        awaitStatus(graph, "first-single.bin", DownloadStatus.DOWNLOADING)
+
+        val source = object : DownloadFolderSource {
+            override suspend fun list(folderId: String): List<FileStat> = when (folderId) {
+                "later-folder" -> listOf(file("late-1", "late-1.bin", 64 * 1024, parentId = "later-folder"))
+                else -> emptyList()
+            }
+
+            override suspend fun remainingDailyDownload(): Long? = null
+        }
+        val folder = FileStat(kind = FileKind.FOLDER, id = "later-folder", name = "Later")
+        graph.downloadCoordinator.enqueueFolders(listOf(folder), source, maxHeight = null, targetDirectory = null)
+
+        val started = withTimeoutOrNull(5_000) {
+            while (true) {
+                val batchTask = graph.downloadCoordinator.tasks.value.values.firstOrNull {
+                    it.batch != null && it.fileName.endsWith("late-1.bin")
+                }
+                if (batchTask != null && (batchTask.status == DownloadStatus.DOWNLOADING || batchTask.status == DownloadStatus.COMPLETED)) {
+                    return@withTimeoutOrNull batchTask.status
+                }
+                delay(50)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            null
+        }
+        val snapshot = graph.downloadCoordinator.tasks.value.values
+            .joinToString { "${it.fileName}:${it.status}" }
+        check(started != null) { "单文件在跑时文件夹任务没有被唤醒，当前任务：$snapshot" }
+        println("[queue] 单文件保持下载中，后加的文件夹任务已进入 $started；当前任务：$snapshot")
+        downloader.release("first-single.bin")
+    }
+}
+
+/**
+ * 直接压 SDK：同一个 PikPakClient 上开两个文件缓存，A 持续慢慢下载大文件，
+ * B 下载 1 MiB 小文件。验证「一个文件在传输时，第二个文件的 download 会不会被饿死」。
+ */
+private suspend fun sdkTwoCachesBench() = runBlocking {
+    val client = PikPakClient("bench-token")
+    val bigSize = 256L * 1024 * 1024
+    val smallSize = 1L * 1024 * 1024
+    val cacheA = client.fileCache(
+        source = SlowRangeSource(bigSize, delayMs = 200),
+        size = bigSize,
+        storeKey = "bench-a",
+        blockStore = MemoryDurableStore(),
+        connectionBudget = 8,
+    )
+    val cacheB = client.fileCache(
+        source = SlowRangeSource(smallSize, delayMs = 0),
+        size = smallSize,
+        storeKey = "bench-b",
+        blockStore = MemoryDurableStore(),
+        connectionBudget = 8,
+    )
+    try {
+        val jobA = cacheA.download()
+        delay(2_000)
+        val aDelivered = cacheA.deliveredBytes
+        val bDone = withTimeoutOrNull(10_000) {
+            cacheB.download().await()
+            true
+        }
+        println(
+            "[sdk] A delivered=$aDelivered B=$bDone budgetUsed=${client.transportMemoryUsedBytes}/${client.transportMemoryBudgetBytes}",
+        )
+        check(bDone == true) { "第二个文件缓存在第一个仍在传输时没有完成（疑似被共享预算/连接闸饿死）" }
+        jobA.cancel()
+    } finally {
+        runCatching { cacheA.close() }
+        runCatching { cacheB.close() }
+        runCatching { client.close() }
+    }
+}
+
+private class SlowRangeSource(private val total: Long, private val delayMs: Long) : RangeSource {
+    override suspend fun <T> read(
+        start: Long,
+        length: Long,
+        priority: Int,
+        block: suspend (ByteReadChannel) -> T,
+    ): T {
+        val end = minOf(start + length, total)
+        val channel = io.ktor.utils.io.ByteChannel(autoFlush = false)
+        val producer = CoroutineScope(currentCoroutineContext()).launch {
+            var pos = start
+            while (pos < end) {
+                val n = minOf(64L * 1024L, end - pos).toInt()
+                channel.writeFully(ByteArray(n) { ((pos + it) % 251).toByte() })
+                channel.flush()
+                pos += n
+                if (delayMs > 0) delay(delayMs)
+            }
+            channel.flushAndClose()
+        }
+        try {
+            return block(channel)
+        } finally {
+            producer.cancel()
+            channel.cancel(java.util.concurrent.CancellationException("bench read finished"))
+        }
+    }
+}
+
+private class MemoryDurableStore : DurableBlockStore {
+    private val blocks = java.util.concurrent.ConcurrentHashMap<Long, ByteArray>()
+    override suspend fun read(file: String, offset: Long, length: Int): ByteArray? = blocks[offset]
+    override suspend fun write(file: String, offset: Long, bytes: ByteArray) {
+        blocks[offset] = bytes
+    }
+
+    override suspend fun missing(file: String, ranges: List<LongRange>): List<LongRange> {
+        val blockSize = 256L * 1024L
+        val out = mutableListOf<LongRange>()
+        for (range in ranges) {
+            var pos = range.first
+            while (pos <= range.last) {
+                if (blocks[pos] == null) out += pos..pos
+                pos += blockSize
+            }
+        }
+        return out
     }
 }
 
