@@ -2,6 +2,28 @@
 
 本项目从上游 Piko 的 fnOS 服务端分支演化而来。版本号为本 fork 自有编号；**0.7.0 起产品名为 FNPak**（`appname` 从 `piko` 改为 `fnpak`）。
 
+## 0.11.0 — 下载层切换上游 SDK 块缓存；新增「同时下载任务数」
+
+**破坏性变更（升级前请读）**
+
+- 整文件下载整体切换为上游 SDK 的块缓存（`PikoFileCache` → `BlockCache` → `RangeReader`），与播放、缩略图共用同一个 `PikPakClient` 和账号级 16 条连接预算，不再维护第二套传输实现
+- 移除自研 `SegmentDownloader`、双直链加速与自适应限流/惩罚记忆（`download-throttle.json`）。旧设置字段 `segmentCount` / `maxConnections` / `dualSignedUrls` / `downloadDiagnostics` 不再生效，读取时直接忽略，不影响旧 `settings.json` 启动
+- **旧版分段任务的进度无法迁移**：乱序写盘的分段文件不能当作顺序前缀导入块缓存，升级后这些任务会重置为「从头下载」并给出提示；已完成任务不受影响
+- 下载并发设置收敛为两个维度：`concurrentConnections`（单文件连接数，1–8，默认 4）与 `maxConcurrentTasks`（同时下载任务数，1–8，默认 3）
+
+**新增**
+
+- 设置页「下载并发」新增「同时下载任务数」下拉（1–8，默认 3）：保存立即扩缩队列，调大即时补位拉起排队任务，调小把多余任务退回排队且不丢已落盘进度
+- `GET /api/settings` 返回 `maxConcurrentTasks`；`POST /api/settings/download-tuning` 支持该字段（省略时保持当前值），越界返回 400（`invalid_tasks`），并继续兼容旧字段 `maxConnections` / `concurrentConnections`
+- 修复：单文件连接数设置此前只写进偏好、没有任何消费者；现在真正落到每个文件的连接预算上（只影响新任务，已开始的任务沿用启动时并发）
+- 队列自愈增强：标记为「下载中」但登记表里已无协程在跑的任务会回到排队并补一次调度，避免任务永远等不到执行
+
+**验证**
+
+- 离线验收台覆盖：旧任务迁移、落盘提交、单文件/多文件、暂停继续、失败重试、删除记录、文件夹递归、单文件下载中追加文件夹、SDK 双缓存共用账号预算并发
+- 冒烟新增回归：单文件保持下载中时追加文件夹，文件夹任务可立即进入下载并完成
+- 版本 `0.11.0`（manifest / `ServerConfig` / `/api/health` / `package.json` 与构建产出一致）
+
 ## 0.10.0 — 目录页：时间 / 列表-卡片切换 / 缩略图 / 文件详情
 
 目录页界面优化。**下载与续传逻辑、`ConnectionBudget` 语义未改**；「本机下载 / 离线任务 / 回收站」三页的排序与数据逻辑未动。

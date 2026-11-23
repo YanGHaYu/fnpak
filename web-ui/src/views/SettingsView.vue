@@ -106,15 +106,19 @@
 
     <section class="card p-4">
       <h2 class="mb-3 text-base font-semibold">下载并发</h2>
-      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_auto] lg:items-end">
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
         <AppField label="单文件并发连接数（1–8）">
           <AppInput v-model="concurrentConnections" type="number" compact />
+        </AppField>
+        <AppField label="同时下载任务数（1–8）">
+          <AppSelect v-model="maxConcurrentTasks" :options="taskCountOptions" placeholder="选择任务数" />
         </AppField>
         <AppButton size="sm" variant="primary" :loading="tuningBusy" @click="saveTuning">保存</AppButton>
       </div>
       <p class="mt-2 text-xs text-muted">
-        与 Piko 原版一致：单个文件最多 8 条连接，默认 4 条。下载、播放、缩略图共用同一个账号级 16 条预算，
-        由 SDK 统一调度；调高只影响新任务，已经在跑的任务沿用开始时的并发。
+        两个维度互不替代：单个文件最多 8 条连接（默认 4 条），同时最多下载 8 个任务（默认 3 个）。
+        下载、播放、缩略图共用同一个账号级 16 条预算，由 SDK 统一调度。任务数改完立即扩缩队列；
+        单文件连接数只影响新任务，已经在跑的任务沿用开始时的并发。
       </p>
       <p v-if="tuningStatus" class="mt-2 text-xs" :class="tuningError ? 'text-danger' : 'text-muted'">
         {{ tuningStatus }}
@@ -188,6 +192,11 @@ const dirStatus = ref('')
 const dirError = ref(false)
 
 const concurrentConnections = ref('4')
+const maxConcurrentTasks = ref('3')
+const taskCountOptions = Array.from({ length: 8 }, (_, index) => ({
+  value: String(index + 1),
+  label: `${index + 1} 个`,
+}))
 const tuningBusy = ref(false)
 const tuningStatus = ref('')
 const tuningError = ref(false)
@@ -213,6 +222,7 @@ async function loadAll() {
   }
   settings.value = result.data
   concurrentConnections.value = String(result.data.concurrentConnections ?? 4)
+  maxConcurrentTasks.value = String(result.data.maxConcurrentTasks ?? 3)
   await loadShares()
 }
 
@@ -287,6 +297,7 @@ async function saveTuning() {
     method: 'POST',
     body: JSON.stringify({
       concurrentConnections: Number(concurrentConnections.value),
+      maxConcurrentTasks: Number(maxConcurrentTasks.value),
     }),
   })
   tuningBusy.value = false
@@ -295,7 +306,9 @@ async function saveTuning() {
     tuningError.value = true
     return
   }
-  tuningStatus.value = `已保存：单文件并发 ${result.data.concurrentConnections} 条（1–8，新任务生效）`
+  tuningStatus.value =
+    `已保存：单文件并发 ${result.data.concurrentConnections} 条、同时 ${result.data.maxConcurrentTasks} 个任务` +
+    '（1–8；任务数立即生效，连接数只影响新任务）'
   await loadAll()
 }
 

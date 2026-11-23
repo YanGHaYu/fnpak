@@ -153,10 +153,12 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
             PikoLog.i("FNPak", "已清理旧版限流惩罚文件 download-throttle.json（自适应并发已移除）")
         }
         preferences.setConcurrentConnections(settings.concurrentConnections)
+        preferences.setMaxConcurrentTasks(settings.maxConcurrentTasks)
         PikoLog.i(
             "FNPak",
             "下载传输：SDK 块缓存（单文件 ${settings.concurrentConnections.coerceIn(1, 8)} 条，" +
-                "与播放/缩略图共用账号 16 条预算；上限 8 条为上游行为）",
+                "同时 ${settings.maxConcurrentTasks.coerceIn(1, 8)} 个任务；" +
+                "与播放/缩略图共用账号 16 条预算，上限 8 条为上游行为）",
         )
         if (legacyMigration.total > 0) {
             PikoLog.w(
@@ -178,6 +180,16 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
             "FNPak",
             "下载并发切换为单文件 $clamped 条（与播放/缩略图共用账号 16 条预算，进行中的任务不变）",
         )
+    }
+
+    /**
+     * 设置页修改同时下载任务数。调度器收集 `maxConcurrentDownloadsFlow` 后立即扩缩：
+     * 调大马上补位拉起排队任务，调小把多出来的任务退回排队（不打断已落盘进度）。
+     */
+    fun applyMaxConcurrentTasks(count: Int) {
+        val clamped = count.coerceIn(1, 8)
+        preferences.setMaxConcurrentTasks(clamped)
+        PikoLog.i("FNPak", "同时下载任务数切换为 $clamped 个（立即生效，排队任务按顺序补位）")
     }
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()

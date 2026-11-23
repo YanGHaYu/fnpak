@@ -1,5 +1,7 @@
 package dev.piko.server.download
 
+import dev.piko.data.auth.DownloadConcurrencyDefaults
+import dev.piko.data.auth.PikoPreferencesSnapshot
 import dev.piko.data.auth.PikoUserPreferences
 import dev.piko.data.auth.PlayerGestureDefaults
 import dev.piko.data.auth.SidePanelPrefs
@@ -122,6 +124,21 @@ class ServerPreferences(
     fun setConcurrentConnections(count: Int) {
         concurrentConnections.value = count.coerceIn(1, 8)
     }
+
+    /** 同时下载的任务数：默认 3，范围 1–8。调度器收集该流后动态扩缩并行任务。 */
+    private val maxConcurrentTasks = cell(DownloadConcurrencyDefaults.DEFAULT)
+    override val maxConcurrentDownloadsFlow: Flow<Int> get() = maxConcurrentTasks
+    override suspend fun setMaxConcurrentDownloads(count: Int) {
+        maxConcurrentTasks.value = DownloadConcurrencyDefaults.sanitize(count)
+    }
+
+    fun setMaxConcurrentTasks(count: Int) {
+        maxConcurrentTasks.value = DownloadConcurrencyDefaults.sanitize(count)
+    }
+
+    /** 调度器构造时用它取任务级并发初值；服务端没有 DataStore，直接反映内存中的设置。 */
+    override val currentSnapshot: PikoPreferencesSnapshot
+        get() = PikoPreferencesSnapshot(maxConcurrentDownloads = maxConcurrentTasks.value)
 
     private val downloadDirPath = cell(downloadDir().toString())
     override val downloadDirPathFlow: Flow<String> get() = downloadDirPath

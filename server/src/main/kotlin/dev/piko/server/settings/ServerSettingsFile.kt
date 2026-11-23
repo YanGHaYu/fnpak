@@ -21,6 +21,13 @@ data class ServerSettings(
      * 会被 `ignoreUnknownKeys` 忽略，不影响旧 `settings.json` 继续解析。
      */
     val concurrentConnections: Int = 4,
+    /**
+     * 同时下载的任务数（1–8，默认 3）。每个任务内部再按 [concurrentConnections] 开连接；
+     * 两者相乘仍受 SDK 的账号 16 条总预算约束（下载、播放、缩略图共用）。
+     *
+     * 旧 `settings.json` 没有该字段时按默认 3 解析（`ignoreUnknownKeys` 保证向前兼容）。
+     */
+    val maxConcurrentTasks: Int = 3,
 )
 
 /**

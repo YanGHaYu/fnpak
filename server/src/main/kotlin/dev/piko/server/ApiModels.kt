@@ -44,6 +44,8 @@ data class SettingsResponse(
      * 与播放、缩略图共用同一个 `PikPakClient`，账号级 16 条预算由 SDK 统一管理。
      */
     val concurrentConnections: Int = 4,
+    /** 同时下载的任务数（1–8，默认 3）。与单文件连接数相乘仍受账号 16 条预算约束。 */
+    val maxConcurrentTasks: Int = 3,
 )
 
 @Serializable
@@ -77,18 +79,21 @@ data class DownloadDirRequest(
 @Serializable
 data class DownloadDirResponse(val downloadDir: String)
 
-/** 下载并发参数：单文件连接数 1–8，与播放/缩略图共用 SDK 的账号 16 条预算。 */
+/** 下载并发参数：单文件连接数 1–8、同时任务数 1–8，与播放/缩略图共用 SDK 的账号 16 条预算。 */
 @Serializable
 data class DownloadTuningRequest(
     val concurrentConnections: Int = 4,
     /** 旧客户端兼容：旧版把同一语义放在 maxConnections 里。 */
     val maxConnections: Int? = null,
+    /** 省略时保持当前的「同时下载任务数」不变（旧客户端只改连接数）。 */
+    val maxConcurrentTasks: Int? = null,
 )
 
 /** 保存后的实际生效值；返回 200+JSON 而不是 204，前端可直接把回包当确认。 */
 @Serializable
 data class DownloadTuningResponse(
     val concurrentConnections: Int,
+    val maxConcurrentTasks: Int,
 )
 
 @Serializable

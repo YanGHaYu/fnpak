@@ -58,6 +58,7 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 ),
                 downloadDir = config.activeDownloadDir.toString(),
                 concurrentConnections = graph.currentSettings().concurrentConnections,
+                maxConcurrentTasks = graph.currentSettings().maxConcurrentTasks,
             ),
         )
     }
@@ -78,8 +79,19 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
             )
             return@post
         }
+        val requestedTasks = body.maxConcurrentTasks ?: graph.currentSettings().maxConcurrentTasks
+        if (requestedTasks !in 1..8) {
+            call.respondError(
+                HttpStatusCode.BadRequest,
+                "invalid_tasks",
+                "同时下载任务数必须在 1–8 之间：$requestedTasks",
+            )
+            return@post
+        }
         runCatching {
-            graph.updateSettings { current -> current.copy(concurrentConnections = requested) }
+            graph.updateSettings { current ->
+                current.copy(concurrentConnections = requested, maxConcurrentTasks = requestedTasks)
+            }
         }
             .onFailure { error ->
                 call.respondError(
@@ -90,12 +102,19 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 return@post
             }
         graph.applyConcurrentConnections(requested)
+        graph.applyMaxConcurrentTasks(requestedTasks)
         PikoLog.w(
             TAG,
-            "下载并发已更新：来源=${call.remoteIp()}，单文件 $requested 条（1–8），" +
-                "与播放/缩略图共用账号 16 条预算（进行中的任务仍按启动时的并发）",
+            "下载并发已更新：来源=${call.remoteIp()}，单文件 $requested 条（1–8）、" +
+                "同时 $requestedTasks 个任务（1–8）；与播放/缩略图共用账号 16 条预算" +
+                "（单文件连接数只影响新任务，任务数立即生效）",
         )
-        call.respond(DownloadTuningResponse(concurrentConnections = requested))
+        call.respond(
+            DownloadTuningResponse(
+                concurrentConnections = requested,
+                maxConcurrentTasks = requestedTasks,
+            ),
+        )
     }
 
     get("/api/settings/shares") {
