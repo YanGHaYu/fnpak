@@ -58,7 +58,8 @@ fun Route.settingsRoutes(config: ServerConfig, access: AccessControl, graph: Ser
                 ),
                 downloadDir = config.activeDownloadDir.toString(),
                 segmentCount = graph.downloadTuning.segmentCount,
-                maxConnections = graph.connectionBudget.max,
+                // 设置页展示的是用户配置的天花板；当前允许的并发由自适应控制器决定，只写日志
+                maxConnections = graph.connectionBudget.maxCeiling,
                 dualSignedUrls = graph.downloadTuning.dualSignedUrls,
                 downloadDiagnostics = graph.downloadTuning.downloadDiagnostics,
             ),
