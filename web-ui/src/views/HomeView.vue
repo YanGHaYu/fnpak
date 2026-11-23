@@ -81,6 +81,16 @@
               <AppIcon :name="option.icon" :size="16" />
             </button>
           </div>
+          <!-- 桌面全选：只作用于当前已加载的一页；半选时显示横杠 -->
+          <label v-if="items.length" class="hidden cursor-pointer items-center gap-0.5 md:flex">
+            <AppCheckbox
+              :model-value="allDriveSelected"
+              :indeterminate="driveSelection.length > 0 && !allDriveSelected"
+              :label="allDriveSelected ? '取消全选' : `全选当前目录（${items.length} 项）`"
+              @update:model-value="toggleAllDrive"
+            />
+            <span class="whitespace-nowrap text-xs text-muted">{{ allDriveSelected ? '取消全选' : '全选' }}</span>
+          </label>
           <AppButton v-if="!driveSelectionMode && items.length" class="md:hidden" size="sm" variant="ghost" @click="driveSelectionMode = true">
             选择
           </AppButton>
@@ -272,7 +282,7 @@
           <p v-if="!items.length && !listBusy" class="py-8 text-center text-sm text-muted">这个目录是空的</p>
         </div>
 
-        <SelectionDock v-if="driveSelection.length">
+        <SelectionDock v-if="driveSelectionMode || driveSelection.length">
           <template #info>
             <!-- 窄屏只留一行（计数 + 类型），体积与「待扫描」说明在桌面展开 -->
             <span class="md:hidden">
@@ -288,8 +298,8 @@
             </span>
           </template>
           <template #actions>
-            <AppButton size="sm" variant="primary" :loading="batchBusy" @click="downloadSelected">下载</AppButton>
-            <AppButton size="sm" variant="danger-soft" @click="deleteCloud(driveSelection)">移入回收站</AppButton>
+            <AppButton size="sm" variant="primary" :disabled="!driveSelection.length" :loading="batchBusy" @click="downloadSelected">下载</AppButton>
+            <AppButton size="sm" variant="danger-soft" :disabled="!driveSelection.length" @click="deleteCloud(driveSelection)">移入回收站</AppButton>
             <div class="hidden md:block">
               <AppMenu
                 :actions="batchMoreActions"
@@ -298,11 +308,15 @@
                 @select="batchMoveCopy"
               >
                 <template #trigger>
-                  <AppButton size="sm">更多</AppButton>
+                  <AppButton size="sm" :disabled="!driveSelection.length">更多</AppButton>
                 </template>
               </AppMenu>
             </div>
-            <AppButton class="md:hidden" size="sm" @click="batchSheet = true">更多</AppButton>
+            <AppButton class="md:hidden" size="sm" :disabled="!driveSelection.length" @click="batchSheet = true">更多</AppButton>
+            <!-- 移动端批量条全选：只作用于当前已加载的一页，再点取消 -->
+            <AppButton class="md:hidden" size="sm" variant="ghost" @click="toggleAllDrive(true)">
+              {{ allDriveSelected ? '取消全选' : `全选（${items.length}）` }}
+            </AppButton>
             <AppButton size="sm" variant="ghost" @click="clearDriveSelection">取消选择</AppButton>
           </template>
         </SelectionDock>
@@ -1064,17 +1078,25 @@ async function loadAuth() {
   }
 }
 
-async function loadList() {
+async function loadList({ preserveSelection = true } = {}) {
   listBusy.value = true
   const result = await api(`/api/drive/list?parentId=${encodeURIComponent(currentParentId.value)}`)
   listBusy.value = false
-  clearDriveSelection()
+  const previous = preserveSelection ? driveSelection.value : []
+  if (!preserveSelection) clearDriveSelection()
   if (!result.ok) {
     listStatus.value = errorText(result)
     items.value = []
+    if (previous.length) clearDriveSelection()
     return
   }
   items.value = result.data?.items || []
+  if (previous.length) {
+    // 刷新后只保留仍在当前页里的选中项；切目录由调用方显式清空
+    const present = new Set(items.value.map((item) => item.id))
+    driveSelection.value = previous.filter((row) => present.has(row.id))
+    if (!driveSelection.value.length) driveSelectionMode.value = false
+  }
   listStatus.value = result.data?.nextPageToken
     ? `${items.value.length} 项（还有下一页，页面暂不翻页；全选只作用于当前页）`
     : `${items.value.length} 项`
@@ -1083,18 +1105,21 @@ async function loadList() {
 function enter(item) {
   if (!item?.id || crumbs.value[crumbs.value.length - 1]?.id === item.id) return
   crumbs.value = [...crumbs.value, { id: item.id, name: item.name }]
+  clearDriveSelection()
   loadList()
 }
 
 function up() {
   if (crumbs.value.length === 1) return
   crumbs.value = crumbs.value.slice(0, -1)
+  clearDriveSelection()
   loadList()
 }
 
 function jumpTo(index) {
   if (index >= crumbs.value.length - 1) return
   crumbs.value = crumbs.value.slice(0, index + 1)
+  clearDriveSelection()
   loadList()
 }
 
@@ -1134,9 +1159,13 @@ function toggleDriveRow(row, value) {
   if (!value && exists) driveSelection.value = driveSelection.value.filter((item) => item.id !== row.id)
   if (!driveSelection.value.length) driveSelectionMode.value = false
 }
-function toggleAllDrive() {
+/**
+ * 全选 / 取消全选（只作用于当前已加载的一页）。
+ * 桌面表头取消全选后退出多选态；移动端批量条的「取消全选」仍停在全选态，方便再点一次全选。
+ */
+function toggleAllDrive(keepMode = false) {
   driveSelection.value = allDriveSelected.value ? [] : items.value.slice()
-  if (!driveSelection.value.length) driveSelectionMode.value = false
+  driveSelectionMode.value = keepMode || driveSelection.value.length > 0
 }
 function clearDriveSelection() {
   driveSelection.value = []
