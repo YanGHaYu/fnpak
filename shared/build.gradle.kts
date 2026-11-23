@@ -12,6 +12,9 @@ val enableIosTargets = providers.gradleProperty("piko.enableIos")
     .get()
 
 kotlin {
+    // fpk 默认构建只需要 JDK 21（见 settings.gradle.kts），shared 也必须用 21 编译，
+    // 否则 Gradle 跑在 JDK 25 上时 desktop target 会产出 class 69，jlink 出来的 21 运行时直接起不来。
+    jvmToolchain(21)
     android {
         namespace = "dev.piko.shared"
         compileSdk {
