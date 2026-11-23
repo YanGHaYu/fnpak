@@ -407,7 +407,9 @@
                       </button>
                     </ScrollName>
                     <p class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted md:hidden">
-                      <span class="rounded-full px-1.5 py-0.5" :class="statusChipClass(row.status)">{{ groupStatusText(row.status) }}</span>
+                      <span class="rounded-full px-1.5 py-0.5" :class="statusChipClass(row.status)">
+                        {{ groupStatusText(row.status) }}<template v-if="Number(row.throttleRemainingSec) > 0"> · 剩余 {{ row.throttleRemainingSec }}s</template>
+                      </span>
                       <!-- 无速率时不渲染占位破折号，避免组元信息前出现多余分隔符 -->
                       <span v-if="Number(row.speedBytesPerSec) > 0" class="font-mono">{{ formatSpeed(row.speedBytesPerSec) }}</span>
                       <span class="font-mono">{{ groupMetaText(row) }}</span>
@@ -421,7 +423,9 @@
                   </div>
                   <span class="hidden text-right font-mono text-xs text-muted md:block">{{ formatSpeed(row.speedBytesPerSec) }}</span>
                   <span class="hidden md:block">
-                    <span class="rounded-full px-1.5 py-0.5 text-xs" :class="statusChipClass(row.status)">{{ groupStatusText(row.status) }}</span>
+                    <span class="rounded-full px-1.5 py-0.5 text-xs" :class="statusChipClass(row.status)">
+                      {{ groupStatusText(row.status) }}<template v-if="Number(row.throttleRemainingSec) > 0"> · 剩余 {{ row.throttleRemainingSec }}s</template>
+                    </span>
                   </span>
 
                   <div class="max-md:col-start-4">
@@ -459,7 +463,7 @@
                               </ScrollName>
                               <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                                 <span class="rounded-full px-1.5 py-0.5 text-[10px]" :class="statusChipClass(child.status)">
-                                  {{ childStatusText(child.status) }} · {{ Number(child.percent) || 0 }}%
+                                  {{ childStatusText(child.status) }}<template v-if="Number(child.throttleRemainingSec) > 0"> · 剩余 {{ child.throttleRemainingSec }}s</template> · {{ Number(child.percent) || 0 }}%
                                 </span>
                                 <span class="font-mono text-[11px] text-muted">
                                   {{ formatSize(child.bytesDone) || '0' }} / {{ formatSize(child.bytesTotal) || '—' }}
@@ -843,7 +847,7 @@ const torrentOpen = ref(false)
 const torrentItem = ref(null)
 
 const activeGroupCount = computed(() =>
-  groups.value.filter((group) => ['SCANNING', 'QUEUED', 'DOWNLOADING'].includes(group.status)).length,
+  groups.value.filter((group) => ['SCANNING', 'QUEUED', 'DOWNLOADING', 'THROTTLED'].includes(group.status)).length,
 )
 const unfinishedTaskCount = computed(() =>
   tasks.value.filter((task) => !['PHASE_TYPE_COMPLETE', 'PHASE_TYPE_ERROR'].includes(task.phase)).length,
@@ -861,13 +865,22 @@ let tasksRefreshTimer = null
 const scrollByTab = {}
 
 const statusType = (status) =>
-  status === 'FAILED' ? 'danger' : status === 'COMPLETED' ? 'success' : status === 'DOWNLOADING' ? 'primary' : 'info'
+  status === 'FAILED'
+    ? 'danger'
+    : status === 'COMPLETED'
+      ? 'success'
+      : status === 'DOWNLOADING'
+        ? 'primary'
+        : status === 'THROTTLED'
+          ? 'warning'
+          : 'info'
 const progressStatus = (status) => (status === 'COMPLETED' ? 'success' : status === 'FAILED' ? 'error' : '')
 const statusChipClass = (status) =>
   ({
     FAILED: 'bg-danger-soft text-danger',
     COMPLETED: 'bg-success-soft text-success',
     DOWNLOADING: 'bg-brand-soft text-brand',
+    THROTTLED: 'bg-warning-soft text-warning',
     SCANNING: 'bg-surface3 text-muted',
     QUEUED: 'bg-surface3 text-muted',
     PAUSED: 'bg-warning-soft text-warning',
@@ -875,7 +888,7 @@ const statusChipClass = (status) =>
     PENDING: 'bg-surface3 text-muted',
   }[status] || 'bg-surface3 text-muted')
 const isTerminal = (status) => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(status)
-const canPause = (group) => ['SCANNING', 'QUEUED', 'DOWNLOADING'].includes(group.status)
+const canPause = (group) => ['SCANNING', 'QUEUED', 'DOWNLOADING', 'THROTTLED'].includes(group.status)
 const canResume = (group) => ['PAUSED', 'CANCELLED', 'FAILED'].includes(group.status)
 const kindText = (kind) => ({ folder: '文件夹', files: '多选批次', single: '单文件' }[kind] || kind)
 const groupStatusText = (status) =>
@@ -883,6 +896,7 @@ const groupStatusText = (status) =>
     SCANNING: '扫描中',
     QUEUED: '排队中',
     DOWNLOADING: '下载中',
+    THROTTLED: '限流冷却中',
     PAUSED: '已暂停',
     COMPLETED: '已完成',
     FAILED: '失败',
@@ -1265,6 +1279,7 @@ function childStatusText(status) {
       PENDING: '等待中',
       QUEUED: '排队中',
       DOWNLOADING: '下载中',
+      THROTTLED: '限流冷却中',
       COMPLETED: '已完成',
       PAUSED: '已暂停',
       FAILED: '失败',
@@ -1559,7 +1574,7 @@ function childActions(child) {
   if (child.status === 'FAILED') {
     actions.push({ key: 'retry', label: '重试', icon: 'retry', hint: '只重跑这个文件，从已下载的断点续传' })
   }
-  if (['PENDING', 'DOWNLOADING'].includes(child.status)) {
+  if (['PENDING', 'DOWNLOADING', 'THROTTLED'].includes(child.status)) {
     actions.push({ key: 'pause', label: '暂停', icon: 'pause', hint: '暂停这个文件' })
   }
   if (child.status === 'PAUSED') {

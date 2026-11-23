@@ -1,6 +1,7 @@
 package dev.piko.server.download
 
 import dev.piko.data.repository.FileNameSanitizer
+import dev.piko.download.DownloadStatus
 import dev.piko.download.DownloadTask
 import dev.piko.server.BatchDownloadRequest
 import dev.piko.server.BatchDownloadResponse
@@ -510,10 +511,13 @@ internal fun ServiceGraph.downloadListResponse(fileId: String? = null): Download
     val tasks = downloadCoordinator.tasks.value.values
         .filter { if (fileId == null) true else it.fileId == fileId }
         .sortedBy { it.createdAtMs }
-    return DownloadListResponse(tasks.map { it.toItem() }, downloadGroups())
+    // 冷却期是全局的：所有正在下载的分段任务都停在 0 字节，任务行要能看出「在等惩罚窗口」，
+    // 而不是 DOWNLOADING + 0 字节让用户以为卡死。
+    val throttleSec = (connectionBudget.cooldownRemainingMs() / 1000).toInt()
+    return DownloadListResponse(tasks.map { it.toItem(throttleSec) }, downloadGroups())
 }
 
-private fun DownloadTask.toItem() = DownloadItem(
+private fun DownloadTask.toItem(throttleSec: Int) = DownloadItem(
     id = taskId,
     fileName = displayName,
     fileId = fileId,
@@ -521,7 +525,7 @@ private fun DownloadTask.toItem() = DownloadItem(
     bytesTotal = totalBytes,
     percent = (progress.toDouble() * 1000).roundToLong() / 10.0,
     speedBytesPerSec = speedBytesPerSec,
-    status = status.name,
+    status = if (throttleSec > 0 && status == DownloadStatus.DOWNLOADING) "THROTTLED" else status.name,
     error = errorMessage,
     path = destinationPath,
     parentTaskId = parentTaskId,
@@ -529,6 +533,7 @@ private fun DownloadTask.toItem() = DownloadItem(
     rootFolderId = rootFolderId,
     batchName = batch?.folderName.orEmpty(),
     batchIsFolder = batch?.isFolder == true,
+    throttleRemainingSec = if (throttleSec > 0 && status == DownloadStatus.DOWNLOADING) throttleSec else 0,
 )
 
 /**

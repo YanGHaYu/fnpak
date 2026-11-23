@@ -339,6 +339,8 @@ data class DownloadItem(
     val rootFolderId: String = "",
     val batchName: String = "",
     val batchIsFolder: Boolean = false,
+    /** 全局限流冷却剩余秒数；大于 0 时任务展示为「限流冷却中」，不是卡死也不是 0 字节的下载中。 */
+    val throttleRemainingSec: Int = 0,
 )
 
 /** 父任务汇总：一个文件夹或一次多选下载合并成一行，进度按总字节汇总。 */
@@ -361,6 +363,8 @@ data class DownloadGroupItem(
     val createdAtMs: Long = 0,
     /** 文件（或文件夹）在本机的落盘目录，删除任务记录时用来提示文件保留在哪。 */
     val path: String = "",
+    /** 全局限流冷却剩余秒数；大于 0 时父任务行也显示「限流冷却中」。 */
+    val throttleRemainingSec: Int = 0,
 )
 
 @Serializable

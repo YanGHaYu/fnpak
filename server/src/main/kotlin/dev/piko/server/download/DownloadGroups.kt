@@ -19,6 +19,8 @@ fun DownloadTask.effectiveGroupId(): String =
  * 进度按总字节汇总，扫描期用已发现的文件数与字节数。
  */
 fun ServiceGraph.downloadGroups(): List<DownloadGroupItem> {
+    // 限流冷却期是全局的：正在跑的父任务行也要显示「限流冷却中」，与任务行的 THROTTLED 一致
+    val throttleSec = (connectionBudget.cooldownRemainingMs() / 1000).toInt()
     val scanning = downloadCoordinator.listings.value.values.map { listing ->
         DownloadGroupItem(
             id = listing.batch.id,
@@ -58,13 +60,13 @@ fun ServiceGraph.downloadGroups(): List<DownloadGroupItem> {
     }
 
     val byGroup = downloadCoordinator.tasks.value.values.groupBy { it.effectiveGroupId() }
-    val taskGroups = byGroup.map { (groupId, tasks) -> groupOf(groupId, tasks) }
+    val taskGroups = byGroup.map { (groupId, tasks) -> groupOf(groupId, tasks, throttleSec) }
     val taskIds = byGroup.keys
     return (scanning + mixedScanning.filter { it.id !in taskIds } + taskGroups)
         .sortedByDescending { it.createdAtMs }
 }
 
-private fun ServiceGraph.groupOf(groupId: String, tasks: List<DownloadTask>): DownloadGroupItem {
+private fun ServiceGraph.groupOf(groupId: String, tasks: List<DownloadTask>, throttleSec: Int): DownloadGroupItem {
     val first = tasks.minByOrNull { it.createdAtMs } ?: tasks.first()
     val batch = first.batch
     val isBatch = tasks.any { it.parentTaskId.isNotBlank() }
@@ -83,7 +85,7 @@ private fun ServiceGraph.groupOf(groupId: String, tasks: List<DownloadTask>): Do
         total > 0 -> (done.toDouble() / total.toDouble() * 1000).roundToLong() / 10.0
         else -> (tasks.map { it.progress.toDouble() }.average().takeIf { !it.isNaN() } ?: 0.0) * 100
     }.let { (it * 10).roundToLong() / 10.0 }
-    val status = groupStatus(tasks, downloadGroupRegistry.isCancelled(groupId))
+    val status = groupStatus(tasks, downloadGroupRegistry.isCancelled(groupId), throttleSec)
     val path = when {
         batch?.isFolder == true -> File(downloadStorage.rootPath(), batch.folderName).path
         kind == "single" -> first.destinationPath.ifBlank { File(downloadStorage.rootPath(), first.fileName).path }
@@ -104,13 +106,14 @@ private fun ServiceGraph.groupOf(groupId: String, tasks: List<DownloadTask>): Do
         error = tasks.firstNotNullOfOrNull { it.errorMessage }?.takeIf { status == "FAILED" },
         createdAtMs = first.createdAtMs,
         path = path,
+        throttleRemainingSec = if (status == "THROTTLED") throttleSec else 0,
     )
 }
 
-private fun groupStatus(tasks: List<DownloadTask>, cancelled: Boolean): String {
+private fun groupStatus(tasks: List<DownloadTask>, cancelled: Boolean, throttleSec: Int): String {
     if (tasks.all { it.status == DownloadStatus.COMPLETED }) return "COMPLETED"
     if (cancelled) return "CANCELLED"
-    if (tasks.any { it.status == DownloadStatus.DOWNLOADING }) return "DOWNLOADING"
+    if (tasks.any { it.status == DownloadStatus.DOWNLOADING }) return if (throttleSec > 0) "THROTTLED" else "DOWNLOADING"
     if (tasks.any { it.status == DownloadStatus.PENDING }) return "QUEUED"
     if (tasks.any { it.status == DownloadStatus.FAILED }) return "FAILED"
     if (tasks.any { it.status == DownloadStatus.PAUSED }) return "PAUSED"

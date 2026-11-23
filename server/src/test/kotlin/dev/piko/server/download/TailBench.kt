@@ -33,11 +33,15 @@ private class Cdn(
     @Volatile var urlCap: Int,
     @Volatile var banMs: Long,
     @Volatile var penalty: String,
+    /** 单 URL 累计请求数上限（不是并发）：超过后一律按惩罚处理，用于验证「请求次数」假设。 */
+    @Volatile var requestCap: Int = 0,
 ) {
     val activeByUrl = ConcurrentHashMap<String, AtomicInteger>()
+    val requestsByUrl = ConcurrentHashMap<String, AtomicInteger>()
     val total = AtomicInteger(0)
     val bannedUntil = AtomicLong(0)
     val penalties = AtomicInteger(0)
+    val requests = AtomicInteger(0)
 }
 
 fun main(args: Array<String>) = runBlocking {
@@ -54,6 +58,10 @@ fun main(args: Array<String>) = runBlocking {
     var banMs = 0L
     var penalty = "503"
     var lanes = 1
+    var requestCap = 0
+    var maxPanels = 32
+    var sim = false
+    var slowConns = 1
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -70,23 +78,41 @@ fun main(args: Array<String>) = runBlocking {
             "--ban-ms" -> banMs = args[++index].toLong()
             "--penalty" -> penalty = args[++index]
             "--lanes" -> lanes = args[++index].toInt()
+            "--req-cap" -> requestCap = args[++index].toInt()
+            "--max-panels" -> maxPanels = args[++index].toInt()
+            "--sim" -> sim = true
+            "--slow-conns" -> slowConns = args[++index].toInt()
         }
         index++
     }
+    if (sim) {
+        // 纯调度模型：比较「固定等分面板」与「动态切分/工作窃取」在慢连接尾部下的耗时与请求数
+        simPanelStrategies(total, minOf(16, ceiling), rate, slowConns)
+        return@runBlocking
+    }
     System.setProperty("piko.download.panelFactor", factor.toString())
+    System.setProperty("piko.download.maxPanels", maxPanels.toString())
     val logDir = File(System.getProperty("java.io.tmpdir"), "piko-tail-bench").apply { mkdirs() }
     PikoLog.install(logDir.absolutePath) { level, tag, message, error ->
         if (level.letter != 'I') println("[${level.letter}][$tag] $message${error?.let { " | ${it::class.simpleName}: ${it.message}" }.orEmpty()}")
     }
 
-    val cdn = Cdn(maxConns, urlConns, banMs, penalty)
+    val cdn = Cdn(maxConns, urlConns, banMs, penalty, requestCap)
     val requestSeq = AtomicInteger()
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.executor = Executors.newCachedThreadPool()
     server.createContext("/f") { exchange ->
         val seq = requestSeq.incrementAndGet()
+        cdn.requests.incrementAndGet()
         val key = exchange.requestURI.query ?: "u=0"
+        val perUrl = cdn.requestsByUrl.getOrPut(key) { AtomicInteger(0) }.incrementAndGet()
         val now = System.currentTimeMillis()
+        // 单 URL 累计请求数上限：与并发无关，第 N+1 次请求起直接拒绝（模拟按请求次数惩罚的 CDN）
+        if (cdn.requestCap > 0 && perUrl > cdn.requestCap) {
+            cdn.penalties.incrementAndGet()
+            penalize(exchange, total, cdn)
+            return@createContext
+        }
         if (now < cdn.bannedUntil.get()) {
             cdn.penalties.incrementAndGet()
             penalize(exchange, total, cdn)
@@ -119,8 +145,8 @@ fun main(args: Array<String>) = runBlocking {
     val startAt = if (initial > 0) initial else minOf(16, ceiling)
     println(
         "[cdn] tasks=$tasks lanes=$lanes total=${total / MIB}MiB rate=${rate / 1024}KiB/s " +
-            "accountCap=$maxConns urlCap=$urlConns penalty=$penalty ban=${banMs}ms | " +
-            "budget=$ceiling initial=$startAt adaptive=$adaptive",
+            "accountCap=$maxConns urlCap=$urlConns reqCap=$requestCap penalty=$penalty ban=${banMs}ms | " +
+            "budget=$ceiling initial=$startAt adaptive=$adaptive maxPanels=$maxPanels",
     )
 
     val budget = ConnectionBudget(ceiling, initialLimit = startAt, adaptive = adaptive)
@@ -141,7 +167,8 @@ fun main(args: Array<String>) = runBlocking {
     results.forEach { println(it) }
     println(
         "[result] 总耗时 $elapsed ms，成功 ${results.count { !it.contains("FAILED") }}/$tasks，" +
-            "峰值连接 ${budget.peak}，最终允许并发 ${budget.max}/${budget.maxCeiling}，CDN 惩罚次数 ${cdn.penalties.get()}",
+            "峰值连接 ${budget.peak}，最终允许并发 ${budget.max}/${budget.maxCeiling}，" +
+            "HTTP 总请求 ${cdn.requests.get()}，CDN 惩罚次数 ${cdn.penalties.get()}",
     )
     server.stop(0)
 }
@@ -258,4 +285,49 @@ private fun serve(exchange: HttpExchange, total: Long, rate: Long) {
     } finally {
         runCatching { exchange.close() }
     }
+}
+
+/**
+ * 纯调度模型：比较「固定等分面板」与「动态切分/工作窃取」在慢连接尾部场景下的耗时与请求数。
+ *
+ * 模型：N 条连接，前 slowConns 条速率只有正常连接的 1/5（模拟某个 CDN 节点/连接在尾部变慢）。
+ * - 方案 1：固定 32 个等分面板，轮询分给连接串行处理，总请求数 = 32；
+ * - 方案 2：初始只开 N 段，连接空下来时从「剩余时间最长」的连接切走一半，请求数 ≈ 2N。
+ */
+private fun simPanelStrategies(totalBytes: Long, conns: Int, rate: Long, slowConns: Int) {
+    val slowRate = (rate / 5.0).coerceAtLeast(1.0)
+    fun speed(i: Int) = if (i < slowConns) slowRate else rate.toDouble()
+
+    val panels = 32
+    val perWorker = DoubleArray(conns)
+    for (p in 0 until panels) perWorker[p % conns] += totalBytes.toDouble() / panels
+    val fixedTime = (0 until conns).maxOf { perWorker[it] / speed(it) }
+
+    val remaining = DoubleArray(conns) { totalBytes.toDouble() / conns }
+    var requests = conns
+    var now = 0.0
+    while (true) {
+        val active = (0 until conns).filter { remaining[it] > 1e-9 }
+        if (active.isEmpty()) break
+        val idx = active.minByOrNull { remaining[it] / speed(it) }!!
+        val step = remaining[idx] / speed(idx)
+        now += step
+        for (i in active) remaining[i] = maxOf(0.0, remaining[i] - speed(i) * step)
+        remaining[idx] = 0.0
+        val victim = (0 until conns)
+            .filter { remaining[it] > 1e-9 }
+            .maxByOrNull { remaining[it] / speed(it) } ?: continue
+        val steal = remaining[victim] / 2
+        remaining[victim] -= steal
+        remaining[idx] = steal
+        requests++
+    }
+
+    fun fmt(seconds: Double) = String.format("%.2f", seconds)
+    println(
+        "[sim] 连接=$conns（慢连接 $slowConns 条，速率 1/5），文件=${totalBytes / MIB}MiB，" +
+            "单连接速率=${rate / 1024}KiB/s",
+    )
+    println("[sim] 方案 1 固定 $panels 段：耗时 ${fmt(fixedTime)} s，总请求 $panels")
+    println("[sim] 方案 2 动态切分/窃取：耗时 ${fmt(now)} s，总请求 $requests")
 }

@@ -66,34 +66,65 @@ private const val MAX_COOLDOWN_MS = 30_000L
 /** 冷却结束后稳定这么久才允许 +1 探测，避免刚恢复又撞上限流。 */
 private const val STABLE_BEFORE_RAMP_MS = 15_000L
 
+/** `Retry-After` 的上限：CDN 偶尔会给很夸张的值，超过 10 分钟按 10 分钟处理。 */
+private const val MAX_RETRY_AFTER_MS = 10 * 60_000L
+
 /** 同一分段因限流最多等这么多轮冷却；超过就交给「单连接续传」兜底。 */
 private const val MAX_THROTTLE_WAITS = 6
 
 /**
- * 识别「被 CDN 限流/惩罚」的异常特征，返回给日志用的原因；普通网络错误返回 null。
- *
- * 这些形态都来自同一种情况——请求被受理，但响应体被掐断：
- * - `closed`：连接在响应前/响应中被对端关闭；
- * - `HTTP 503`：CDN 的过载/限流响应；
- * - `fixed content-length: N, bytes received: 0`（JDK HttpClient 的报文）：声明了长度却 0 字节；
- * - `EOF reached while reading`：读流时对端提前关闭；
- * - `reset`：连接被重置。
+ * 一次限流信号：可读原因 + CDN 显式要求的冷却时长（`Retry-After`，毫秒）。
+ * 有 [retryAfterMs] 时按它冷却，不再叠加本地指数退避。
  */
-internal fun throttleSignal(error: Throwable): String? {
-    val text = generateSequence(error) { it.cause }
-        .mapNotNull { it.message }
-        .joinToString(" | ")
-        .lowercase()
+internal class ThrottleSignal(val reason: String, val retryAfterMs: Long? = null)
+
+/**
+ * 识别「被 CDN 限流/惩罚」的异常特征；普通网络错误返回 null。
+ *
+ * 区分两种零字节情况（真机日志里 `fixed content-length: N, bytes received: 0` 与
+ * `EOF reached while reading` 混在一起，只看文案会把「被拒」和「真断连」混为一谈）：
+ * - **一个字节都没读到**：请求被受理但响应体为空就关闭，更像限流/惩罚 → 算限流信号；
+ * - **读到一部分后断开**：连接真的断了，按普通网络错误重试，不进入全局冷却。
+ *
+ * 503 / 429 直接算限流；`Retry-After` 由 [ThrottledResponse] 带上来。
+ */
+internal fun throttleSignal(error: Throwable): ThrottleSignal? {
+    val chain = generateSequence(error) { it.cause }.toList()
+    chain.filterIsInstance<ThrottledResponse>().firstOrNull()?.let {
+        return ThrottleSignal(it.reason, it.retryAfterMs)
+    }
+    chain.filterIsInstance<RangeInterrupted>().firstOrNull()?.let {
+        return if (it.bytesRead <= 0L) {
+            ThrottleSignal("零字节响应（一个字节都没读到）")
+        } else {
+            null
+        }
+    }
+    val text = chain.mapNotNull { it.message }.joinToString(" | ").lowercase()
     return when {
-        text.contains("http 503") -> "HTTP 503"
-        text.contains("http 429") -> "HTTP 429"
-        text.contains("bytes received: 0") -> "零字节响应"
-        text.contains("eof reached") -> "响应体提前结束"
-        text.contains("closed") -> "连接被关闭"
-        text.contains("reset") -> "连接被重置"
+        text.contains("http 503") -> ThrottleSignal("HTTP 503")
+        text.contains("http 429") -> ThrottleSignal("HTTP 429")
+        text.contains("bytes received: 0") -> ThrottleSignal("零字节响应（一个字节都没读到）")
         else -> null
     }
 }
+
+/** 请求被 CDN 明确拒绝（429/503）；`Retry-After` 存在时按它冷却。 */
+private class ThrottledResponse(val reason: String, val retryAfterMs: Long?) :
+    IOException("HTTP $reason" + (retryAfterMs?.let { "（Retry-After ${it / 1000} 秒）" } ?: ""))
+
+/**
+ * 分段读取中断。记下**这次请求实际读到多少字节**，由 [throttleSignal] 决定是限流还是普通断连。
+ */
+private class RangeInterrupted(val bytesRead: Long, val expectedBytes: Long, cause: Throwable?) :
+    IOException(
+        if (bytesRead <= 0L) {
+            "零字节响应：一个字节都没读到（${cause?.message ?: "响应体为空"}）"
+        } else {
+            "读到 $bytesRead/$expectedBytes 字节后断开（${cause?.message ?: "响应体提前结束"}）"
+        },
+        cause,
+    )
 
 
 /** 每个下载任务各打一行「完成度/速度/活跃分段」，用于判断尾部掉速是并发降了还是单连接变慢。 */
@@ -101,15 +132,31 @@ private val PROGRESS_MILESTONES = intArrayOf(10, 25, 50, 75, 90, 95, 99)
 
 /**
  * 分段再细分倍数。保持连接数不变（gate/budget 仍是每 URL 8 条、全局按设置），只是把文件切成
- * 更多小段排队：8 段时最后 12.5% 的文件只剩 1 条连接在跑，实测掉速明显；细分 8 倍后尾部
+ * 更多小段排队：8 段时最后 12.5% 的文件只剩 1 条连接在跑，实测掉速明显；细分之后尾部
  * 只剩最后 1~2 个小段，速度能保持到接近 100%。
+ *
+ * 注意：细分倍数直接放大「同一签名 URL 上的累计请求数」。真机日志显示在途只有 2 条时仍然零字节，
+ * 说明 CDN 可能按**请求次数**而不是并发数惩罚；因此总段数由 [MAX_PANELS_PER_TASK] 硬上限兜底，
+ * 细分倍数只在天花板以内生效。
  */
 private const val TAIL_PANEL_FACTOR_DEFAULT = 8
 
 /** 允许离线 bench 用 `-Dpiko.download.panelFactor=1` 复现旧行为；线上不设置就是 [TAIL_PANEL_FACTOR_DEFAULT]。 */
 private val TAIL_PANEL_FACTOR: Int by lazy {
-    System.getProperty("piko.download.panelFactor")?.toIntOrNull()?.coerceIn(1, 32)
+    System.getProperty("piko.download.panelFactor")?.toIntOrNull()?.coerceIn(1, 64)
         ?: TAIL_PANEL_FACTOR_DEFAULT
+}
+
+/**
+ * 单个下载任务的分段总数硬上限（双直链时两条 lane 合计）。
+ *
+ * 128 段意味着同一签名 URL 上累计 64 次 Range 请求，是 16 段的 8 倍；若 CDN 按请求次数惩罚账号，
+ * 这个放大就是新的回归来源。32 段在 16 条连接下每连接约 2 段，尾段只占 1/32，掉速可接受。
+ * 允许 bench 用 `-Dpiko.download.maxPanels=` 放开，复现旧行为做对照。
+ */
+private val MAX_PANELS_PER_TASK: Int by lazy {
+    System.getProperty("piko.download.maxPanels")?.toIntOrNull()?.coerceIn(1, 512)
+        ?: 32
 }
 
 /** 每条签名直链最多同时开几条连接：CDN 对同一签名 URL 的第 9 条起返回 503（SDK 实测 n−8）。 */
@@ -186,6 +233,8 @@ class ConnectionBudget(
     private val reclaimAfterMs: Long = RECLAIM_AFTER_MS,
     /** 关闭后退化为固定并发，仅用于离线对照。 */
     private val adaptive: Boolean = true,
+    /** 跨重启的惩罚记忆：上次限流未过期时，本次启动不从 16 条重新撞上去。 */
+    private val throttles: ThrottleMemory? = null,
 ) {
     /**
      * 一次申请到的名额。归还幂等：被自愈回收之后，原持有者的 `finally` 再归还也不会多减。
@@ -241,6 +290,31 @@ class ConnectionBudget(
 
     val adaptiveMode: Boolean get() = adaptive
 
+    init {
+        // 跨重启惩罚记忆：上一轮限流还没过期时，这次启动直接按最低并发静默，不再从 16 条撞一遍。
+        // 否则「重启 → 16 条 → 立刻被拒 → 再冷却」会自我续期，用户永远等不到惩罚窗口结束。
+        val saved = throttles?.load()
+        val nowMs = System.currentTimeMillis()
+        if (adaptive && saved != null && saved.penaltyUntilMs > nowMs) {
+            val remainMs = saved.penaltyUntilMs - nowMs
+            limit = MIN_LIMIT.coerceAtMost(ceiling)
+            cooldownUntilNs = System.nanoTime() + remainMs * 1_000_000
+            cooldownBackoffMs = remainMs
+            stableSinceNs = System.nanoTime()
+            lastThrottleReason = saved.reason
+            PikoLog.w(
+                TAG,
+                "账号限流冷却中：上次限流原因「${saved.reason.ifBlank { "未知" }}」，剩余 ${(remainMs + 999) / 1000} 秒，" +
+                    "本次从 $limit 条起步并静默（不重置回 ${ADAPTIVE_INITIAL_CONNECTIONS} 条）",
+            )
+        } else if (saved != null && saved.lastThrottleAtMs > 0L) {
+            PikoLog.i(
+                TAG,
+                "上次限流（${saved.reason.ifBlank { "未知" }}）的惩罚窗口已过，本次按正常并发启动",
+            )
+        }
+    }
+
     /** 冷却剩余毫秒数；0 表示不在冷却窗口内。 */
     fun cooldownRemainingMs(): Long {
         val remain = cooldownUntilNs - System.nanoTime()
@@ -255,29 +329,46 @@ class ConnectionBudget(
     }
 
     /**
-     * 收到限流信号（`closed` / 503 / 零字节响应）时调用：并发减半并进入冷却窗口。
+     * 收到限流信号（零字节响应 / 503 / 429）时调用：并发减半并进入冷却窗口。
      * 冷却期内重复上报直接忽略——一次限流会让上百个分段同时失败，逐个翻倍会把退避拖成天文数字。
+     *
+     * [retryAfterMs] 来自响应头 `Retry-After`：有它时按 CDN 给的时间冷却，不用本地指数退避。
      */
     @Synchronized
-    fun onThrottle(reason: String) {
+    fun onThrottle(reason: String, retryAfterMs: Long? = null) {
         if (!adaptive) return
         val now = System.nanoTime()
         if (now < cooldownUntilNs) return
         val old = limit
         val next = (old / 2).coerceAtLeast(MIN_LIMIT).coerceAtMost(ceiling)
-        cooldownBackoffMs = if (cooldownBackoffMs == 0L) {
-            THROTTLE_COOLDOWN_MS
-        } else {
-            (cooldownBackoffMs * 2).coerceAtMost(MAX_COOLDOWN_MS)
-        }
-        cooldownUntilNs = now + cooldownBackoffMs * 1_000_000
+        val cooldownMs = retryAfterMs
+            ?.coerceIn(1_000L, MAX_RETRY_AFTER_MS)
+            ?: if (cooldownBackoffMs == 0L) {
+                THROTTLE_COOLDOWN_MS
+            } else {
+                (cooldownBackoffMs * 2).coerceAtMost(MAX_COOLDOWN_MS)
+            }
+        cooldownBackoffMs = cooldownMs
+        cooldownUntilNs = now + cooldownMs * 1_000_000
         limit = next
         stableSinceNs = now
         lastThrottleReason = reason
         PikoLog.w(
             TAG,
-            "限流信号（$reason）：全局并发 $old→$next（上限 $ceiling），冷却 ${cooldownBackoffMs} ms，在途 $active",
+            "限流信号（$reason）：全局并发 $old→$next（上限 $ceiling），冷却 $cooldownMs ms" +
+                (if (retryAfterMs != null) "（按 Retry-After）" else "") + "，在途 $active",
         )
+        // 立刻落盘：进程被重启时也要知道「账号还在惩罚窗口里」，不能把并发重置回 16 再撞一次
+        runCatching {
+            throttles?.save(
+                ThrottleState(
+                    lastThrottleAtMs = System.currentTimeMillis(),
+                    penaltyUntilMs = System.currentTimeMillis() + cooldownMs,
+                    limitAtThrottle = next,
+                    reason = reason,
+                ),
+            )
+        }
     }
 
     /** 每成功拉完一段调用一次：冷却结束后稳定 [STABLE_BEFORE_RAMP_MS]，缓慢 +1 探测。 */
@@ -474,9 +565,10 @@ class SegmentDownloader(
         val dualEnabled = tuning.dualSignedUrls && secondUrlProvider != null &&
             totalBytes >= DUAL_LANE_MIN_BYTES
         // 开启双直链时段数翻倍：每条 lane 各自跑满 segmentCount 条连接，而不是把原有 8 段拆成 4+4。
-        // 再按 TAIL_PANEL_FACTOR 细分：连接数仍由 gate/budget 限制在 segmentCount 附近，但接近完成时
-        // 剩下的活会摊到更多小段上，不会出现「最后 1/8 文件只靠 1 条连接」的掉速尾巴。
-        val lanePanels = tuning.segmentCount * TAIL_PANEL_FACTOR
+        // 再按 TAIL_PANEL_FACTOR 细分（受 MAX_PANELS_PER_TASK 硬上限约束）：连接数仍由 gate/budget 限制在
+        // segmentCount 附近，但接近完成时剩下的活会摊到更多小段上，不会出现「最后 1/8 文件只靠 1 条连接」。
+        val requestedPanels = minOf(tuning.segmentCount * TAIL_PANEL_FACTOR, MAX_PANELS_PER_TASK)
+        val lanePanels = if (dualEnabled) maxOf(1, requestedPanels / 2) else requestedPanels
         val panels = planPanels(totalBytes, if (dualEnabled) lanePanels * 2 else lanePanels)
         val book = ProgressBook(panels, completedRanges)
         val degraded = AtomicBoolean(false)
@@ -604,15 +696,16 @@ class SegmentDownloader(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Throwable) {
-                    // 限流类失败不消耗普通重试次数：冷却窗口是全局的，重试只会把惩罚拖长
+                    // 限流类失败不消耗普通重试次数：冷却窗口是全局的，重试只会把惩罚拖长。
+                    // 只有「一个字节都没读到」或 429/503 才算；读到一部分后断开按普通断连重试。
                     val throttle = throttleSignal(error)
                     if (throttle != null) {
-                        budget.onThrottle(throttle)
+                        budget.onThrottle(throttle.reason, throttle.retryAfterMs)
                         if (++throttleWaits > MAX_THROTTLE_WAITS) throw SegmentFailed(panel, error)
                         val waited = budget.awaitCooldown()
                         PikoLog.w(
                             TAG,
-                            "分段 ${panel.index} 命中限流（$throttle），暂停 ${waited} ms 后重试" +
+                            "分段 ${panel.index} 命中限流（${throttle.reason}），暂停 ${waited} ms 后重试" +
                                 "（限流等待 $throttleWaits/$MAX_THROTTLE_WAITS，当前并发 ${budget.max}）",
                         )
                         continue
@@ -750,12 +843,12 @@ class SegmentDownloader(
                 } catch (error: Throwable) {
                     val throttle = throttleSignal(error)
                     if (throttle != null) {
-                        budget.onThrottle(throttle)
+                        budget.onThrottle(throttle.reason, throttle.retryAfterMs)
                         if (++throttleWaits > MAX_THROTTLE_WAITS) throw SegmentFailed(panel, error)
                         val waited = budget.awaitCooldown()
                         PikoLog.w(
                             TAG,
-                            "单连接续传命中限流（$throttle），暂停 ${waited} ms 后重试" +
+                            "单连接续传命中限流（${throttle.reason}），暂停 ${waited} ms 后重试" +
                                 "（限流等待 $throttleWaits/$MAX_THROTTLE_WAITS，当前并发 ${budget.max}）",
                         )
                         continue
@@ -804,6 +897,12 @@ class SegmentDownloader(
                 runCatching { response.body().close() }
                 throw LinkExpired(url, "HTTP $status")
             }
+            // 429/503 是 CDN 的明确限流响应：带 Retry-After 就按它的秒数冷却，不用本地退避
+            if (status == 429 || status == 503) {
+                val retryAfterMs = retryAfterMillis(response.headers().firstValue("retry-after").orElse(null))
+                runCatching { response.body().close() }
+                throw ThrottledResponse("HTTP $status", retryAfterMs)
+            }
             if (status != 200 && status != 206) {
                 runCatching { response.body().close() }
                 throw IOException("HTTP $status")
@@ -815,10 +914,19 @@ class SegmentDownloader(
             }
             response.body().use { input ->
                 var position = from
+                val expected = to - from + 1
                 val buffer = ByteArray(BUFFER_BYTES)
                 while (position <= to) {
                     currentCoroutineContext().ensureActive()
-                    val read = input.read(buffer)
+                    // 读流阶段的异常统一包成 RangeInterrupted：带上是「一个字节都没读到」还是「读到一部分」，
+                    // 上层据此区分限流与真断连（此前只看报文文案，把两者混为一谈）。
+                    val read = try {
+                        input.read(buffer)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Throwable) {
+                        throw RangeInterrupted(bytesRead, expected, error)
+                    }
                     if (read < 0) break
                     if (read == 0) continue
                     if (status == 200 && position != 0L) throw IOException("上游忽略 Range 返回整个文件")
@@ -833,7 +941,7 @@ class SegmentDownloader(
                     bytesRead += read
                     onBytes(read)
                 }
-                if (position <= to) throw IOException("上游提前结束：写到 $position，目标 $to")
+                if (position <= to) throw RangeInterrupted(bytesRead, expected, null)
             }
         } finally {
             metrics.recordRequest(
@@ -906,6 +1014,24 @@ class SegmentDownloader(
     private fun backoffMillis(attempt: Int): Long {
         val base = 800L shl (attempt - 1).coerceIn(0, 4)
         return base.coerceAtMost(15_000L) + Random.nextLong(0, 300)
+    }
+
+    /**
+     * 解析 `Retry-After`：既支持秒数（`120`），也支持 HTTP 日期（RFC 1123）。
+     * 解析失败返回 null，交给自适应控制器按自己的退避冷却。
+     */
+    private fun retryAfterMillis(raw: String?): Long? {
+        val value = raw?.trim().orEmpty()
+        if (value.isEmpty()) return null
+        value.toLongOrNull()?.let { seconds ->
+            if (seconds <= 0L) return null
+            return (seconds * 1000L).coerceAtMost(MAX_RETRY_AFTER_MS)
+        }
+        return runCatching {
+            val at = java.time.ZonedDateTime.parse(value, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+            val delta = at.toInstant().toEpochMilli() - System.currentTimeMillis()
+            delta.takeIf { it > 0L }?.coerceAtMost(MAX_RETRY_AFTER_MS)
+        }.getOrNull()
     }
 }
 

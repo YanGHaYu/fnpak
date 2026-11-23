@@ -12,6 +12,7 @@ import dev.piko.server.download.SegmentDownloader
 import dev.piko.server.download.ServerDownloadStorage
 import dev.piko.server.download.ServerFolderSource
 import dev.piko.server.download.ServerPreferences
+import dev.piko.server.download.ThrottleMemory
 import dev.piko.server.settings.ServerSettings
 import dev.piko.server.settings.ServerSettingsFile
 import dev.piko.shared.auth.DesktopSessionStore
@@ -125,8 +126,14 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
     /**
      * 全局并发预算：起始 [ADAPTIVE_INITIAL_CONNECTIONS] 条，遇到限流信号自动减半并冷却，
      * 稳定后再缓慢加回；设置页配置值是天花板。
+     *
+     * 惩罚记忆落在 `$home/download-throttle.json`：上一轮限流未过期时，本次启动从 2 条起步并静默，
+     * 避免「重启 → 16 条 → 再被拒 → 再冷却」把惩罚窗口无限续期。
      */
-    val connectionBudget = ConnectionBudget(settings.maxConnections)
+    val connectionBudget = ConnectionBudget(
+        settings.maxConnections,
+        throttles = ThrottleMemory(config.home.resolve("download-throttle.json")),
+    )
 
     /** 取一次文件详情并挑出可用直链；同一文件再取一次会拿到另一份签名（同签名时第二 lane 自动放弃）。 */
     private val directUrlProvider: suspend (String) -> String = { fileId ->
@@ -174,11 +181,20 @@ class ServiceGraph(val config: ServerConfig) : AutoCloseable {
 
     init {
         downloadCoordinator.bindDefaultFolderSource(serverFolderSource)
-        PikoLog.i(
-            "FNPak",
-            "下载并发：起始 ${connectionBudget.max} 条，天花板 ${connectionBudget.maxCeiling} 条（自适应，" +
-                "遇到 closed/503/零字节响应自动降半并冷却，稳定后缓慢恢复）",
-        )
+        val cooldownSec = (connectionBudget.cooldownRemainingMs() + 999) / 1000
+        if (cooldownSec > 0) {
+            PikoLog.w(
+                "FNPak",
+                "账号限流冷却中，剩余 $cooldownSec 秒：本次从 ${connectionBudget.max} 条起步，" +
+                    "冷却结束前不发起新连接（重启不会重置惩罚）",
+            )
+        } else {
+            PikoLog.i(
+                "FNPak",
+                "下载并发：起始 ${connectionBudget.max} 条，天花板 ${connectionBudget.maxCeiling} 条（自适应，" +
+                    "遇到零字节响应/503/429 自动降半并冷却，稳定后缓慢恢复）",
+            )
+        }
     }
 
     val downloadDirectory: File get() = config.activeDownloadDir.toFile()
