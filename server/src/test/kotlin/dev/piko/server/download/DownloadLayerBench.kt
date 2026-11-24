@@ -60,6 +60,9 @@ fun main() = runBlocking {
     println("===== 6. SDK 两个文件缓存并发（共用 client 预算） =====")
     sdkTwoCachesBench()
 
+    println("===== 7. 可恢复传输失败（自动重试而不是判失败） =====")
+    autoRetryBench()
+
     println("BENCH OK")
 }
 
@@ -321,6 +324,40 @@ private class MemoryDurableStore : DurableBlockStore {
     }
 }
 
+private suspend fun autoRetryBench() = runBlocking {
+    withGraph { graph, downloader ->
+        downloader.transientFailOnce("flaky.bin")
+        graph.downloadCoordinator.enqueue(file("flaky", "flaky.bin", 128 * 1024))
+
+        val waiting = withTimeoutOrNull(10_000) {
+            while (true) {
+                val task = graph.downloadCoordinator.tasks.value.values.firstOrNull { it.fileName == "flaky.bin" }
+                if (task?.status == DownloadStatus.FAILED) error("可恢复失败被直接判失败：${task.errorMessage}")
+                if (task?.status == DownloadStatus.PENDING && task.errorMessage?.contains("自动重试") == true) {
+                    return@withTimeoutOrNull task
+                }
+                delay(30)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            null
+        } ?: error("可恢复失败没有进入等待重试")
+        println("[retry] 首次传输中断 → ${waiting.status}：${waiting.errorMessage}")
+
+        val completed = withTimeoutOrNull(25_000) {
+            while (true) {
+                val task = graph.downloadCoordinator.tasks.value.values.firstOrNull { it.fileName == "flaky.bin" }
+                if (task?.status == DownloadStatus.FAILED) error("自动重试后仍失败：${task.errorMessage}")
+                if (task?.status == DownloadStatus.COMPLETED) return@withTimeoutOrNull task
+                delay(50)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            null
+        } ?: error("自动重试没有恢复下载")
+        check(completed.downloadedBytes == completed.totalBytes) { "自动恢复后大小不对" }
+        println("[retry] 退避后自动恢复并完成，held=${completed.downloadedBytes}/${completed.totalBytes}")
+    }
+}
+
 private suspend fun withGraph(block: suspend (Graph, FakeDirectDownloader) -> Unit) {
     val root = Files.createTempDirectory("fnpak-bench-")
     val downloadDir = root.resolve("download").toFile().apply { mkdirs() }
@@ -386,11 +423,13 @@ private class FakeDirectDownloader(private val root: Path) : PikoDirectDownloade
     override val name: String = "bench-fake"
     private val holds = mutableSetOf<String>()
     private val failures = mutableMapOf<String, Int>()
+    private val transientFailures = mutableMapOf<String, Int>()
     private val digests = mutableMapOf<String, String>()
 
     fun hold(fileName: String) { holds += fileName }
     fun release(fileName: String) { holds -= fileName }
     fun failOnce(fileName: String) { failures[fileName] = 1 }
+    fun transientFailOnce(fileName: String) { transientFailures[fileName] = 1 }
     fun checksumFor(fileName: String): String = digests[fileName].orEmpty()
 
     override suspend fun download(
@@ -431,6 +470,11 @@ private class FakeDirectDownloader(private val root: Path) : PikoDirectDownloade
     }
 
     private fun fails(fileName: String) {
+        val transient = transientFailures[fileName] ?: 0
+        if (transient > 0) {
+            transientFailures[fileName] = transient - 1
+            throw java.io.IOException("bench 模拟传输中断（可重试）")
+        }
         val left = failures[fileName] ?: 0
         if (left > 0) {
             failures[fileName] = left - 1

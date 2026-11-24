@@ -68,6 +68,9 @@ internal class DownloadTaskExecutor(
     private val queueLock = Mutex()
     private val partialPlaybackEpoch = MutableStateFlow(0L)
     private var lastGroup: String? = null
+    /** 自动重试的次数与「本轮起点 + 退避时长」（进程内状态；重启后归零，靠续传不受影响）。 */
+    private val retryAttempts = mutableMapOf<String, Int>()
+    private val retryDeadlines = mutableMapOf<String, Pair<TimeMark, Long>>()
     @kotlin.concurrent.Volatile
     private var maxParallel: Int = DownloadConcurrencyDefaults.sanitize(preferences.currentSnapshot.maxConcurrentDownloads)
 
@@ -275,6 +278,88 @@ internal class DownloadTaskExecutor(
         pumpQueue()
     }
 
+    /**
+     * 可恢复的传输失败（冷归档唤醒、BodyStall、直链过期、429/5xx）不落 FAILED：
+     * 回到排队，等退避时间到了自动再试，块缓存里已经落盘的部分会跳过。
+     * 超过 [MAX_DOWNLOAD_RETRIES] 次才返回 null，交给调用方按失败收尾。
+     */
+    private suspend fun scheduleAutoRetry(taskId: String, error: Throwable): RetryPlan? {
+        val reactivating = PikoErrorMapper.isReactivating(error)
+        val plan = queueLock.withLock {
+            val attempt = (retryAttempts[taskId] ?: 0) + 1
+            if (attempt > MAX_DOWNLOAD_RETRIES) {
+                retryAttempts.remove(taskId)
+                retryDeadlines.remove(taskId)
+                return@withLock null
+            }
+            retryAttempts[taskId] = attempt
+            val waitMs = retryDelayMs(attempt, reactivating)
+            val plan = RetryPlan(attempt, waitMs, reactivating)
+            retryDeadlines[taskId] = TimeSource.Monotonic.markNow() to waitMs
+            // 提示要和退避起点在同一把锁内写入：pumpQueue 把「提示为空」当作手动重试，
+            // 若先放出锁再写提示，中间被调度一次就会绕过退避。
+            store.updateTask(taskId) {
+                it.copy(
+                    status = DownloadStatus.PENDING,
+                    speedBytesPerSec = 0L,
+                    errorMessage = retryHint(plan),
+                )
+            }
+            plan
+        } ?: return null
+        PikoLog.i(
+            DOWNLOAD_LOG_TAG,
+            "Download auto-retry ${plan.attempt}/$MAX_DOWNLOAD_RETRIES in ${plan.waitMs}ms: " +
+                "task=$taskId, reason=${PikoErrorMapper.download(error)}, detail=${error::class.simpleName}: ${error.message}",
+        )
+        scope.launch {
+            delay(plan.waitMs)
+            pumpQueue()
+        }
+        return plan
+    }
+
+    private suspend fun clearRetryState(taskId: String) {
+        queueLock.withLock {
+            retryAttempts.remove(taskId)
+            retryDeadlines.remove(taskId)
+        }
+    }
+
+    private fun retryDelayMs(attempt: Int, reactivating: Boolean): Long {
+        val base = if (reactivating) RETRY_REACTIVATING_BASE_MS else RETRY_BASE_MS
+        val cap = if (reactivating) RETRY_REACTIVATING_MAX_MS else RETRY_MAX_MS
+        var wait = base
+        repeat(attempt - 1) { wait = (wait * 2).coerceAtMost(cap) }
+        return wait.coerceAtMost(cap)
+    }
+
+    private fun retryHint(plan: RetryPlan): String {
+        val attempt = "${plan.attempt}/$MAX_DOWNLOAD_RETRIES"
+        val wait = plan.waitSeconds
+        return if (plan.reactivating) {
+            tr(
+                "云端正在唤醒该文件，约 $wait 秒后自动重试（第 $attempt 次）",
+                "The cloud is reactivating this file; retrying automatically in ${wait}s (attempt $attempt)",
+                "クラウドがこのファイルを復元中です。約 ${wait} 秒後に自動で再試行します（$attempt 回目）",
+                "클라우드에서 파일을 복구 중입니다. 약 ${wait}초 후 자동으로 다시 시도합니다($attempt 회차)",
+                "雲端正在喚醒該檔案，約 $wait 秒後自動重試（第 $attempt 次）",
+            )
+        } else {
+            tr(
+                "云端暂时不可用，约 $wait 秒后自动重试（第 $attempt 次）",
+                "The cloud is temporarily unavailable; retrying automatically in ${wait}s (attempt $attempt)",
+                "クラウドが一時的に利用できません。約 ${wait} 秒後に自動で再試行します（$attempt 回目）",
+                "클라우드를 일시적으로 사용할 수 없습니다. 약 ${wait}초 후 자동으로 다시 시도합니다($attempt 회차)",
+                "雲端暫時無法使用，約 $wait 秒後自動重試（第 $attempt 次）",
+            )
+        }
+    }
+
+    private data class RetryPlan(val attempt: Int, val waitMs: Long, val reactivating: Boolean) {
+        val waitSeconds: Long get() = (waitMs / 1000).coerceAtLeast(1)
+    }
+
     /** 所有批次与单文件共用并发上限 [maxParallel]，各组轮流获得位置，取消中的任务收尾后才腾出位置。 */
     fun pumpQueue() {
         scope.launch {
@@ -282,6 +367,12 @@ internal class DownloadTaskExecutor(
                 var slots = (maxParallel - jobs.value.size).coerceAtLeast(0)
                 val pending = store.tasks.value.values.filter {
                     it.status == DownloadStatus.PENDING && store.belongsToCurrent(it) && it.taskId !in jobs.value
+                }.filter { task ->
+                    // 自动重试的退避期没到就继续等；用户手动重试/恢复会清掉 errorMessage，立即放行
+                    val (mark, waitMs) = retryDeadlines[task.taskId] ?: return@filter true
+                    val ready = mark.elapsedNow().inWholeMilliseconds >= waitMs || task.errorMessage == null
+                    if (ready) retryDeadlines.remove(task.taskId)
+                    ready
                 }.sortedWith(compareBy({ it.createdAtMs }, { it.fileName }))
                     .groupBy { it.batch?.id ?: "single" }.mapValues { it.value.toMutableList() }.toMutableMap()
                 while (slots > 0 && pending.isNotEmpty()) {
@@ -294,7 +385,8 @@ internal class DownloadTaskExecutor(
                     var claimed = false
                     store.updateTask(next.taskId) {
                         claimed = it.status == DownloadStatus.PENDING && store.belongsToCurrent(it)
-                        if (claimed) it.copy(status = DownloadStatus.DOWNLOADING) else it
+                        // 重新开跑就把上一轮的重试提示清掉，避免「下载中」还挂着「稍后自动重试」
+                        if (claimed) it.copy(status = DownloadStatus.DOWNLOADING, errorMessage = null) else it
                     }
                     if (claimed) {
                         launchDownload(next.taskId)
@@ -677,6 +769,7 @@ internal class DownloadTaskExecutor(
                         progressFraction = null,
                     )
                 }
+                clearRetryState(taskId)
                 task.batch?.let { batch ->
                     val members = store.tasks.value.values.filter { it.batch?.id == batch.id }
                     if (members.all { it.status == DownloadStatus.COMPLETED }) {
@@ -689,6 +782,7 @@ internal class DownloadTaskExecutor(
                 }
             }
         } catch (e: CancellationException) {
+            clearRetryState(taskId)
             store.updateTask(taskId) {
                 it.copy(
                     status = if (it.status == DownloadStatus.PENDING) it.status else DownloadStatus.PAUSED,
@@ -719,24 +813,51 @@ internal class DownloadTaskExecutor(
                 }
             } else {
                 val converting = store.tasks.value[taskId]?.converting == true
-                PikoLog.w(
-                    DOWNLOAD_LOG_TAG,
-                    "Download failed: task=${logDownloadTask(taskId)}, ${logFile(task.fileId, task.fileName)}, " +
-                        "held=${lease?.entry?.store?.heldBytes?.value ?: "?"}/${task.totalBytes} B, " +
-                        "elapsedMs=${started.elapsedNow().inWholeMilliseconds}" +
-                        (if (lease == null) ", stage=before_cache_lease" else if (converting) ", stage=remux" else ", stage=transfer"),
-                    e,
-                )
-                store.updateTask(taskId) {
-                    it.copy(
-                        status = DownloadStatus.FAILED,
-                        speedBytesPerSec = 0L,
-                        downloadedBytes = lease?.entry?.store?.heldBytes?.value ?: it.downloadedBytes,
-                        // 失败行要能看出原因（HTTP 状态 / 直链失效 / 空间不足 / 目录不可写），原始堆栈只进日志
-                        errorMessage = PikoErrorMapper.download(e),
-                        converting = false,
-                        progressFraction = null,
+                val heldBytes = lease?.entry?.store?.heldBytes?.value ?: task.downloadedBytes
+                val stage = if (lease == null) "before_cache_lease" else if (converting) "remux" else "transfer"
+                // 冷归档唤醒、BodyStall、直链过期、429/5xx 都是可恢复的：回到排队等下一轮，
+                // 而不是把「云端正在唤醒」这种临时状态显示成失败。
+                val retry = if (!converting && PikoErrorMapper.isRetryableDownloadFailure(e)) {
+                    scheduleAutoRetry(taskId, e)
+                } else {
+                    null
+                }
+                if (retry != null) {
+                    PikoLog.w(
+                        DOWNLOAD_LOG_TAG,
+                        "Download recoverable failure, will retry ${retry.attempt}/$MAX_DOWNLOAD_RETRIES " +
+                            "in ${retry.waitMs}ms: task=${logDownloadTask(taskId)}, ${logFile(task.fileId, task.fileName)}, " +
+                            "held=$heldBytes/${task.totalBytes} B, elapsedMs=${started.elapsedNow().inWholeMilliseconds}, " +
+                            "stage=$stage, reactivating=${retry.reactivating}",
+                        e,
                     )
+                    store.updateTask(taskId) {
+                        it.copy(
+                            downloadedBytes = heldBytes,
+                            converting = false,
+                            progressFraction = null,
+                        )
+                    }
+                } else {
+                    clearRetryState(taskId)
+                    PikoLog.w(
+                        DOWNLOAD_LOG_TAG,
+                        "Download failed: task=${logDownloadTask(taskId)}, ${logFile(task.fileId, task.fileName)}, " +
+                            "held=$heldBytes/${task.totalBytes} B, " +
+                            "elapsedMs=${started.elapsedNow().inWholeMilliseconds}, stage=$stage",
+                        e,
+                    )
+                    store.updateTask(taskId) {
+                        it.copy(
+                            status = DownloadStatus.FAILED,
+                            speedBytesPerSec = 0L,
+                            downloadedBytes = heldBytes,
+                            // 失败行要能看出原因（HTTP 状态 / 直链失效 / 空间不足 / 目录不可写），原始堆栈只进日志
+                            errorMessage = PikoErrorMapper.download(e),
+                            converting = false,
+                            progressFraction = null,
+                        )
+                    }
                 }
             }
         } finally {
@@ -1035,5 +1156,12 @@ internal class DownloadTaskExecutor(
         private const val BATCH_LOG_MIN_BYTES = 64L * 1024 * 1024
         /** 队列自愈的检查间隔；30s 足够兜住漏唤醒，又不会频繁扫描任务表。 */
         private const val QUEUE_WATCHDOG_INTERVAL_MS = 30_000L
+        /** 可恢复失败最多自动重试几轮；冷唤醒单轮由 SDK 先等 5 分钟，这里再补几轮。 */
+        private const val MAX_DOWNLOAD_RETRIES = 8
+        private const val RETRY_BASE_MS = 15_000L
+        private const val RETRY_MAX_MS = 120_000L
+        /** 冷归档唤醒给更长的退避：云端真正恢复可能要十几分钟。 */
+        private const val RETRY_REACTIVATING_BASE_MS = 60_000L
+        private const val RETRY_REACTIVATING_MAX_MS = 300_000L
     }
 }

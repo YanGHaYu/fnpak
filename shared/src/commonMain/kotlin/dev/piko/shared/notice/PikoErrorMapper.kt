@@ -27,8 +27,40 @@ object PikoErrorMapper {
         else -> null
     }
 
-    private fun isReactivating(error: Throwable): Boolean =
-        generateSequence(error) { it.cause }.take(6).any { it is FileReactivatingException }
+    fun isReactivating(error: Throwable): Boolean =
+        generateSequence(error) { it.cause }.take(8).any { it is FileReactivatingException }
+
+    /**
+     * 传输层/云端的临时问题：原样重试（块缓存已落盘的部分会跳过）就可能成功。
+     *
+     * 覆盖场景：冷归档唤醒、BodyStall/断流、直链过期（403）、429/5xx、连接重置与超时、
+     * SDK 内部的 `download failed at offset N`（RangeReader 重试耗尽后包的 -1）。
+     * 明确不可重试的：401（账号失效）、404（文件已删）、磁盘/权限类错误。
+     */
+    fun isRetryableDownloadFailure(error: Throwable): Boolean {
+        val chain = generateSequence(error) { it.cause }.take(8).toList()
+        // 磁盘满/只读挂载不是网络抖动，重试只会把同一个错误再写一遍
+        val details = chain.mapNotNull { it.message }.joinToString("；")
+        if (details.contains("No space left", ignoreCase = true) || details.contains("ENOSPC", ignoreCase = true) ||
+            details.contains("Permission denied", ignoreCase = true) || details.contains("Read-only file system", ignoreCase = true)
+        ) {
+            return false
+        }
+        if (isReactivating(error)) return true
+        if (error is InstantContentUnavailableException) return true
+        if (chain.any { it is IOException }) return true
+        val api = chain.filterIsInstance<PikPakException>().firstOrNull() ?: return false
+        if (api.isConcurrencyRestriction) return true
+        val status = api.httpStatus
+        if (status != null) {
+            return status == 403 || status == 408 || status == 425 || status == 429 || status >= 500
+        }
+        val text = "${api.errorMessage.orEmpty()} ${api.message.orEmpty()}"
+        return text.contains("download failed at offset") ||
+            text.contains("RangeReader") ||
+            text.contains("reactivation", ignoreCase = true) ||
+            text.contains("timeout", ignoreCase = true)
+    }
 
     private val reactivatingMessage: String get() = tr(
         "文件长期未访问，云端正在唤醒恢复，请稍后重试",
