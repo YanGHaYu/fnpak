@@ -1,5 +1,5 @@
 appname=fnpak
-version=0.11.0
+version=0.11.1
 display_name=FNPak
 desc=PikPak 第三方 NAS 客户端 · 非官方：Web UI 浏览云盘、磁力/分享入库、离线任务与下载。
 source=thirdparty
